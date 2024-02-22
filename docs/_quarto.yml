@@ -1,0 +1,9 @@
+format:
+  html:
+    theme: {dark: cyborg, light: yeti}
+    toc: true
+    toc-depth: 4
+project: {type: book}
+book:
+  title: Linear Discriminate Analysis
+  chapters: [index.qmd, assignment.eda.qmd, assignment.clojure_smile.qmd, assignment.r_caret.qmd]

@@ -1,0 +1,900 @@
+
+---
+format:
+  html:
+    theme: {dark: cyborg, light: yeti}
+    toc: true
+    toc-depth: 4
+    output-file: assignment.clojure_smile.html
+code-block-background: true
+base-target-path: temp
+include-in-header: {text: '<link rel = "icon" href = "data:," />'}
+
+---
+<style></style><style>.printedClojure .sourceCode {
+  background-color: transparent;
+  border-style: none;
+}
+</style>
+<script src="assignment.clojure_smile_files/md-default0.js" type="text/javascript"></script><script src="assignment.clojure_smile_files/md-default1.js" type="text/javascript"></script><script src="assignment.clojure_smile_files/vega2.js" type="text/javascript"></script><script src="assignment.clojure_smile_files/vega3.js" type="text/javascript"></script><script src="assignment.clojure_smile_files/vega4.js" type="text/javascript"></script>
+
+::: {.sourceClojure}
+```clojure
+(ns assignment.clojure-smile
+  (:require
+    [assignment.eda :refer [concrete-data]]
+    [calc-metric.patch]
+    [aerial.hanami.templates :as ht]
+    [scicloj.noj.v1.vis.hanami :as hanami]
+    [fastmath.stats :as stats]
+    [scicloj.kindly.v4.kind :as kind]
+    [scicloj.metamorph.ml.viz :as ml-viz]
+    [scicloj.ml.core :as ml]
+    [scicloj.ml.dataset :as ds]
+    [scicloj.ml.metamorph :as mm]))
+```
+:::
+
+
+
+# Smile with Clojure
+
+## Define regressors and response
+
+
+::: {.sourceClojure}
+```clojure
+(def response :concrete-compressive-strength)
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(def regressors
+  (ds/column-names concrete-data (complement #{response})))
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(ds/info concrete-data)
+```
+:::
+
+
+data/Concrete_Data.csv: descriptive-stats [9 11]:
+
+|                      :col-name | :datatype | :n-valid | :n-missing |   :min |        :mean |   :max | :standard-deviation |       :skew |  :first | :last |
+|--------------------------------|-----------|---------:|-----------:|-------:|-------------:|-------:|--------------------:|------------:|--------:|------:|
+|                        :cement |  :float64 |     1030 |          0 | 102.00 | 281.16786408 |  540.0 |        104.50636449 |  0.50948118 |  540.00 | 260.9 |
+|            :blast-furnace-slag |  :float64 |     1030 |          0 |   0.00 |  73.89582524 |  359.4 |         86.27934175 |  0.80071690 |    0.00 | 100.5 |
+|                       :fly-ash |  :float64 |     1030 |          0 |   0.00 |  54.18834951 |  200.1 |         63.99700415 |  0.53735391 |    0.00 |  78.3 |
+|                         :water |  :float64 |     1030 |          0 | 121.80 | 181.56728155 |  247.0 |         21.35421857 |  0.07462838 |  162.00 | 200.6 |
+|              :superplasticizer |  :float64 |     1030 |          0 |   0.00 |   6.20466019 |   32.2 |          5.97384139 |  0.90720257 |    2.50 |   8.6 |
+|              :coarse-aggregate |  :float64 |     1030 |          0 | 801.00 | 972.91893204 | 1145.0 |         77.75395397 | -0.04021974 | 1040.00 | 864.5 |
+|                :fine-aggregate |  :float64 |     1030 |          0 | 594.00 | 773.58048544 |  992.6 |         80.17598014 | -0.25300960 |  676.00 | 761.5 |
+|                           :age |    :int16 |     1030 |          0 |   1.00 |  45.66213592 |  365.0 |         63.16991158 |  3.26917740 |   28.00 |  28.0 |
+| :concrete-compressive-strength |  :float64 |     1030 |          0 |   2.33 |  35.81796117 |   82.6 |         16.70574196 |  0.41697729 |   79.99 |  32.4 |
+
+
+
+
+## Setup pipelines
+This is the data to model machine. Here I would add normalizing, standardizing, feature engineering, etc. I chose to leave it plain for simplicity. I plan to add parameters in `create-model-pipeline` in a future assignment to accommodate different data processing machines.
+
+
+::: {.sourceClojure}
+```clojure
+(def pipeline-fn
+  (ml/pipeline
+    (mm/set-inference-target response)))
+```
+:::
+
+
+
+### Generic pipeline function
+Abstracted my process since last assignment and continuing that process.
+
+
+::: {.sourceClojure}
+```clojure
+(defn create-model-pipeline
+  [model-type params]
+  (ml/pipeline
+    pipeline-fn
+    {:metamorph/id :model}
+    (mm/model (merge {:model-type model-type} params))))
+```
+:::
+
+
+
+#### Gradient tree context
+This is not a "regression tree" as typically though in R's `rpart` library. Clojure's Smile does not have any regression tree models. The closest thing I found was a gradient tree. Below, in the grid-search code, you will see I set one of it's `:trees` hyperparameters to 1 as to make a single "regression tree."
+
+
+::: {.sourceClojure}
+```clojure
+(defn gradient-tree-pipe-fn
+  [params]
+  (create-model-pipeline :smile.regression/gradient-tree-boost params))
+```
+:::
+
+
+
+#### Random forest context
+
+
+::: {.sourceClojure}
+```clojure
+(defn random-forest-pipe-fn
+  [params]
+  (create-model-pipeline :smile.regression/random-forest params))
+```
+:::
+
+
+
+## Pipeline Functions
+Last section shows the data processing, generic pipeline, and context specific pipeline all as functions. Perhaps this functions fed to functions is how many programming languages can/should be passed, I only found it fun and interesting in Clojure. It looks and feels just like defining a variable, no fancy curly brackets for R functions and no syntactic colons for Python.
+
+### Evaluate pipeline
+
+
+::: {.sourceClojure}
+```clojure
+(defn evaluate-pipe [pipe data]
+  (ml/evaluate-pipelines
+    pipe
+    data
+    stats/omega-sq
+    :accuracy
+    {:other-metrices                   [{:name :mae :metric-fn ml/mae}
+                                        {:name :rmse :metric-fn ml/rmse}]
+     :return-best-pipeline-only        false
+     :return-best-crossvalidation-only true}))
+```
+:::
+
+
+
+### Generate hyperparameters for models
+This was an interesting section if only because scicloj.ml.metamorph library's hyperparameters 1) didn't include the hyperparameters for some of its models and 2) can return the wrong type for the hyperparameters. You can find model definitions and some examples at scicloj's model [tutorial](https://scicloj.github.io/scicloj.ml-tutorials/userguide-models.html).
+No hyperparameters with :smile.regression/gradient-tree-boost or :smile.regression/random-forest
+
+
+::: {.sourceClojure}
+```clojure
+(ml/hyperparameters :smile.classification/decision-tree)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+{:max-nodes
+ {:scicloj.metamorph.ml.gridsearch/type :linear,
+  :start 10.0,
+  :end 1000.0,
+  :n-steps 30,
+  :result-space :float64},
+ :node-size
+ {:scicloj.metamorph.ml.gridsearch/type :linear,
+  :start 1.0,
+  :end 20.0,
+  :n-steps 20,
+  :result-space :float64},
+ :max-depth
+ {:scicloj.metamorph.ml.gridsearch/type :linear,
+  :start 1.0,
+  :end 50.0,
+  :n-steps 20,
+  :result-space :float64},
+ :split-rule
+ {:scicloj.metamorph.ml.gridsearch/type :linear,
+  :start 0.0,
+  :end 2.0,
+  :n-steps 3,
+  :result-space [:gini :entropy :classification-error]}}
+
+```
+:::
+
+
+Look at the types for the hyperparameters for a classification tree. For example, `max-nodes`, why is the type `:float64`? Are we going to have 3.7 nodes? To make the gridsearch, I had to refer to the tutorial above for both the hyperparameters, types, and default grid ranges.
+
+
+::: {.sourceClojure}
+```clojure
+(defn generate-hyperparams [model-type]
+  (case model-type
+    :gradient-tree (take 60
+                         (ml/sobol-gridsearch {:trees       1 ;(ml/linear 1 1000 10 :int32)
+                                               :loss        (ml/categorical [:least-absolute-deviation :least-squares])
+                                               :max-depth   (ml/linear 10 50 20 :int32)
+                                               :max-nodes   (ml/linear 10 1000 30 :int32)
+                                               :node-size   (ml/linear 1 20 20 :int32)
+                                               :shrinkage   (ml/linear 0.1 1)
+                                               :sample-rate (ml/linear 0.1 1 10)}))
+    :random-forest (take 30
+                         (ml/sobol-gridsearch {:trees       (ml/linear 1 1000 10 :int32)
+                                               :max-depth   (ml/linear 10 50 20 :int32)
+                                               :max-nodes   (ml/linear 10 1000 30 :int32)
+                                               :node-size   (ml/linear 1 20 20 :int32)
+                                               :sample-rate (ml/linear 0.1 1 10)}))))
+```
+:::
+
+
+
+### Evaluate a single model
+
+
+::: {.sourceClojure}
+```clojure
+(defn evaluate-model [dataset split-fn model-type model-fn]
+  (let [data-split (split-fn dataset)
+        pipelines (map model-fn (generate-hyperparams model-type))]
+    (evaluate-pipe pipelines data-split)))
+```
+:::
+
+
+
+### Split functions
+In fact, having two splits is not necessary because I do not have a 2nd set of parameters to tune such as a cutoff value, for example. I could simply use the `train-test` function on my dataset to cross-validate a well tuned models according to my grid and the fits per hyperparameter.
+
+
+::: {.sourceClojure}
+```clojure
+(defn train-test [dataset]
+  (ds/split->seq dataset :bootstrap {:seed 123 :repeats 25}))
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(defn train-val [dataset]
+  (let [ds-split (train-test dataset)]
+    (ds/split->seq (:train (first ds-split)) :kfold {:seed 123 :k 5})))
+```
+:::
+
+
+
+### Define model types and corresponding functions as a vector of vectors
+
+
+::: {.sourceClojure}
+```clojure
+(def model-type-fns
+  {:gradient-tree gradient-tree-pipe-fn
+   :random-forest random-forest-pipe-fn})
+```
+:::
+
+
+
+### Evaluate models for a dataset
+
+
+::: {.sourceClojure}
+```clojure
+(defn evaluate-models [dataset split-fn]
+  (mapv (fn [[model-type model-fn]]
+          (evaluate-model dataset split-fn model-type model-fn))
+        model-type-fns))
+```
+:::
+
+
+
+### Evaluate separately
+
+
+::: {.sourceClojure}
+```clojure
+(def tree-models (evaluate-models concrete-data train-val))
+```
+:::
+
+
+
+## Extract usable models
+This is a function in past assignments I stored away in `src/utils`. I might as well have it in the code as it's a work horse, restructuring the deeply nested maps of models created and evaluated.
+
+
+::: {.sourceClojure}
+```clojure
+(defn best-models [eval]
+  (->> eval
+       flatten
+       (map
+         #(hash-map :summary (ml/thaw-model (get-in % [:fit-ctx :model]))
+                    :fit-ctx (:fit-ctx %)
+                    :timing-fit (:timing-fit %)
+                    :metric ((comp :metric :test-transform) %)
+                    :other-metrices ((comp :other-metrices :test-transform) %)
+                    :other-metric-1 ((comp :metric first) ((comp :other-metrices :test-transform) %))
+                    :other-metric-2 ((comp :metric second) ((comp :other-metrices :test-transform) %))
+                    :params ((comp :options :model :fit-ctx) %)
+                    :pipe-fn (:pipe-fn %)))
+       (sort-by :metric)))
+```
+:::
+
+
+
+### Gradient tree
+
+
+::: {.sourceClojure}
+```clojure
+(def best-val-gradient-tree
+  (-> (first tree-models)
+      best-models
+      reverse))
+```
+:::
+
+
+
+#### GT summary
+
+
+::: {.sourceClojure}
+```clojure
+(-> best-val-gradient-tree first :summary)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+#object[smile.regression.GradientTreeBoost 0x65f02106 "smile.regression.GradientTreeBoost@65f02106"]
+
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> best-val-gradient-tree first :metric)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+0.9072492939263214
+
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> best-val-gradient-tree first :other-metrices)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+({:name :mae,
+  :metric-fn
+  #object[scicloj.ml.core$mae 0x16c47c75 "scicloj.ml.core$mae@16c47c75"],
+  :metric 7.5912688090729175}
+ {:name :rmse,
+  :metric-fn
+  #object[scicloj.ml.core$rmse 0x10e78cbb "scicloj.ml.core$rmse@10e78cbb"],
+  :metric 9.575299033324562})
+
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> best-val-gradient-tree first :params)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+{:model-type :smile.regression/gradient-tree-boost,
+ :trees 1,
+ :loss :least-squares,
+ :max-depth 37,
+ :max-nodes 829,
+ :node-size 2,
+ :shrinkage 0.49090909090909096,
+ :sample-rate 0.8999999999999999}
+
+```
+:::
+
+
+Just by observing the hyperparameters--viz. max-depth, max-nodes, and node-size--I trust that tree is over-fit. We will observe the learning curve when building the final model below.
+
+
+::: {.sourceClojure}
+```clojure
+^kind/smile-model
+(-> best-val-gradient-tree first :summary .trees seq)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+(#object[smile.regression.RegressionTree 0x4a29ef6b "n=742\nnode), split, n, loss, yval, (yprob)\n* denotes terminal node\n1) root 742 1.9460e+05 0.290492 \n 2) age<=21.0000 237 36861 -11.1491 \n  4) cement<=356.300 166 13759 -16.0755 \n   8) superplasticizer<=7.85000 118 4370.2 -19.9296 \n    16) age<=10.5000 98 2343.8 -21.4406 \n     32) fine-aggregate<=756.000 28 769.34 -17.1975 \n      64) cement<=174.150 5 76.062 -24.5299 \n       128) cement<=154.050 2 15.457 -28.2479 *\n       129) cement>154.050 3 14.527 -22.0512 *\n      65) cement>174.150 23 366.03 -15.6035 \n       130) coarse-aggregate<=948.700 3 23.122 -9.17120 *\n       131) coarse-aggregate>948.700 20 200.16 -16.5684 \n        262) cement<=310.700 13 99.492 -18.0848 \n         524) coarse-aggregate<=1033.60 11 69.060 -17.4697 \n          1048) water<=197.750 8 33.291 -16.6391 \n           2096) coarse-aggregate<=1016.95 5 14.497 -15.4519 \n            4192) cement<=202.100 2 6.2305 -16.8929 *\n            4193) cement>202.100 3 1.3451 -14.4912 *\n           2097) coarse-aggregate>1016.95 3 0.0000 -18.6179 *\n          1049) water>197.750 3 15.533 -19.6845 *\n         525) coarse-aggregate>1033.60 2 3.3800 -21.4679 *\n        263) cement>310.700 7 15.257 -13.7521 \n         526) blast-furnace-slag<=105.350 5 0.00048000 -14.6859 \n          1052) cement<=339.100 2 0.0000 -14.6979 *\n          1053) cement>339.100 3 0.0000 -14.6779 *\n         527) blast-furnace-slag>105.350 2 0.0000 -11.4179 *\n     33) fine-aggregate>756.000 70 868.69 -23.1379 \n      66) cement<=127.800 7 33.174 -27.9150 \n       132) age<=5.00000 3 1.9494 -30.1479 *\n       133) age>5.00000 4 5.0503 -26.2404 \n        266) cement<=119.300 2 2.9041 -26.9729 *\n        267) cement>119.300 2 0.0000 -25.5079 *\n      67) cement>127.800 63 658.02 -22.6071 \n       134) fine-aggregate<=843.800 41 404.49 -21.7654 \n        268) coarse-aggregate<=978.200 11 87.710 -19.5151 \n         536) age<=5.00000 2 0.23120 -22.9779 *\n         537) age>5.00000 9 58.169 -18.7456 \n          1074) cement<=332.000 7 9.9727 -19.7893 \n           2148) coarse-aggregate<=953.700 3 5.2445 -20.6512 *\n           2149) coarse-aggregate>953.700 4 0.82810 -19.1429 \n            4298) cement<=265.500 2 0.0000 -18.6879 *\n            4299) cement>265.500 2 0.0000 -19.5979 *\n          1075) cement>332.000 2 13.886 -15.0929 *\n        269) coarse-aggregate>978.200 30 240.66 -22.5905 \n         538) superplasticizer<=7.70000 28 156.88 -23.0371 \n          1076) cement<=205.350 6 23.842 -25.8445 \n           2152) blast-furnace-slag<=21.0500 3 5.4531 -24.1445 *\n           2153) blast-furnace-slag>21.0500 3 1.0485 -27.5445 *\n          1077) cement>205.350 22 72.852 -22.2715 \n           2154) coarse-aggregate<=1107.50 20 56.396 -22.0034 \n            4308) fine-aggregate<=808.500 12 10.382 -21.4520 \n             8616) cement<=222.800 2 0.25205 -23.0329 *\n             8617) cement>222.800 10 4.1326 -21.1359 \n              17234) fine-aggregate<=769.150 2 1.4112 -21.8979 *\n              17235) fine-aggregate>769.150 8 1.2697 -20.9454 \n               34470) coarse-aggregate<=1072.20 4 0.17820 -20.6279 \n                68940) cement<=290.400 2 0.0000 -20.4179 *\n                68941) cement>290.400 2 0.0018000 -20.8379 *\n               34471) coarse-aggregate>1072.20 4 0.28510 -21.2629 \n                68942) cement<=288.400 2 0.045000 -21.5079 *\n                68943) cement>288.400 2 0.0000 -21.0179 *\n            4309) fine-aggregate>808.500 8 36.895 -22.8304 \n             8618) age<=5.00000 5 16.322 -21.9079 \n              17236) cement<=320.500 2 0.0000 -24.0079 *\n              17237) cement>320.500 3 1.6224 -20.5079 *\n             8619) age>5.00000 3 9.2256 -24.3679 *\n           2155) coarse-aggregate>1107.50 2 0.63845 -24.9529 *\n         539) superplasticizer>7.70000 2 0.0000 -16.3379 *\n       135) fine-aggregate>843.800 22 170.36 -24.1756 \n        270) fine-aggregate<=890.150 11 87.689 -25.8279 \n         540) cement<=243.000 5 9.1239 -27.9639 \n          1080) fine-aggregate<=854.500 3 4.3011 -27.1712 *\n          1081) fine-aggregate>854.500 2 0.11045 -29.1529 *\n         541) cement>243.000 6 36.742 -24.0479 \n          1082) water<=189.600 2 0.0000 -22.0379 *\n          1083) water>189.600 4 24.622 -25.0529 \n           2166) coarse-aggregate<=970.500 2 21.125 -24.1179 *\n           2167) coarse-aggregate>970.500 2 0.0000 -25.9879 *\n        271) fine-aggregate>890.150 11 22.607 -22.5233 \n         542) fine-aggregate<=901.350 6 0.053333 -21.3245 \n          1084) cement<=227.000 2 0.0000 -21.4579 *\n          1085) cement>227.000 4 0.0000 -21.2579 *\n         543) fine-aggregate>901.350 5 3.5841 -23.9619 \n          1086) water<=167.900 2 0.0000 -23.4079 *\n          1087) water>167.900 3 2.5611 -24.3312 *\n    17) age>10.5000 20 706.19 -12.5254 \n     34) fine-aggregate<=871.100 17 400.09 -10.9114 \n      68) fly-ash<=168.650 15 252.71 -11.9865 \n       136) coarse-aggregate<=1065.90 13 168.76 -11.0586 \n        272) water<=197.450 11 109.30 -10.2106 \n         544) cement<=190.850 3 39.117 -12.9312 *\n         545) cement>190.850 8 39.649 -9.19036 \n          1090) fly-ash<=59.3000 2 5.6113 -7.14286 *\n          1091) fly-ash>59.3000 6 22.858 -9.87286 \n           2182) superplasticizer<=6.10000 2 13.886 -8.56286 *\n           2183) superplasticizer>6.10000 4 3.8232 -10.5279 \n            4366) cement<=244.750 2 0.58320 -9.62786 *\n            4367) cement>244.750 2 0.0000 -11.4279 *\n        273) water>197.450 2 8.0401 -15.7229 *\n       137) coarse-aggregate>1065.90 2 0.0000 -18.0179 *\n      69) fly-ash>168.650 2 0.0000 -2.84786 *\n     35) fine-aggregate>871.100 3 10.881 -21.6712 *\n   9) superplasticizer>7.85000 48 3327.8 -6.60099 \n    18) age<=5.00000 20 824.93 -11.8829 \n     36) blast-furnace-slag<=48.4000 8 218.49 -18.3654 \n      72) cement<=250.450 4 42.433 -23.0004 \n       144) cement<=215.750 2 17.582 -25.4929 *\n       145) cement>215.750 2 0.00020000 -20.5079 *\n      73) cement>250.450 4 4.1919 -13.7304 \n       146) cement<=263.700 2 0.28880 -14.4579 *\n       147) cement>263.700 2 1.7861 -13.0029 *\n     37) blast-furnace-slag>48.4000 12 46.133 -7.56120 \n      74) water<=158.200 5 8.5573 -9.48586 \n       148) cement<=252.250 3 0.0000 -8.43786 *\n       149) cement>252.250 2 0.32000 -11.0579 *\n      75) water>158.200 7 5.8243 -6.18644 \n       150) cement<=295.250 4 0.0000 -5.40786 *\n       151) cement>295.250 3 0.16667 -7.22453 *\n    19) age>5.00000 28 1546.3 -2.82822 \n     38) cement<=213.600 11 194.72 -9.54877 \n      76) fine-aggregate<=776.300 4 11.749 -4.57536 \n       152) cement<=170.400 2 0.018050 -2.86286 *\n       153) cement>170.400 2 0.00080000 -6.28786 *\n      77) fine-aggregate>776.300 7 27.491 -12.3907 \n       154) cement<=201.400 4 1.1163 -14.0529 *\n       155) cement>201.400 3 0.58907 -10.1745 *\n     39) cement>213.600 17 533.30 1.52037 \n      78) water<=159.000 10 197.84 -1.78186 \n       156) water<=156.900 8 81.785 -0.104114 \n        312) water<=145.400 2 8.9042 4.25214 *\n        313) water>145.400 6 22.276 -1.55620 \n         626) cement<=233.350 2 11.858 0.307136 *\n         627) cement>233.350 4 0.0012000 -2.48786 *\n       157) water>156.900 2 3.4584 -8.49286 *\n      79) water>159.000 7 70.633 6.23785 \n       158) blast-furnace-slag<=48.9000 2 1.5842 2.02214 *\n       159) blast-furnace-slag>48.9000 5 19.286 7.92414 *\n  5) cement>356.300 71 9653.6 0.369037 \n   10) water<=183.050 41 4010.2 5.21750 \n    20) age<=5.00000 17 548.13 -2.32257 \n     40) fly-ash<=86.5000 11 88.661 0.765772 \n      80) water<=150.450 3 0.68667 5.00880 *\n      81) water>150.450 8 13.711 -0.825364 \n       162) water<=157.750 2 0.0000 -2.45786 *\n       163) water>157.750 6 6.6043 -0.281197 \n        326) cement<=410.000 4 0.60750 -0.782864 *\n        327) cement>410.000 2 2.9768 0.722136 *\n     41) fly-ash>86.5000 6 162.21 -7.98453 \n      82) superplasticizer<=12.9500 3 4.7171 -2.86120 *\n      83) superplasticizer>12.9500 3 0.0000 -13.1079 *\n    21) age>5.00000 24 1810.9 10.5584 \n     42) fly-ash<=39.5000 13 1011.5 15.3283 \n      84) water<=145.950 2 0.0000 23.2321 *\n      85) water>145.950 11 863.83 13.8912 \n       170) blast-furnace-slag<=100.500 5 10.823 15.7901 \n        340) water<=146.700 3 0.0000 14.6521 *\n        341) water>146.700 2 1.1101 17.4971 *\n       171) blast-furnace-slag>100.500 6 819.95 12.3088 \n        342) cement<=393.800 4 816.75 11.7921 *\n        343) cement>393.800 2 0.0000 13.3421 *\n     43) fly-ash>39.5000 11 154.13 4.92123 \n      86) fly-ash<=113.000 7 144.38 5.56928 \n       172) cement<=416.500 2 0.0000 5.81214 *\n       173) cement>416.500 5 144.22 5.47214 *\n      87) fly-ash>113.000 4 1.6641 3.78714 \n       174) water<=173.000 2 0.0000 4.43214 *\n       175) water>173.000 2 0.0000 3.14214 *\n   11) water>183.050 30 3362.4 -6.25720 \n    22) fine-aggregate<=710.050 14 810.20 2.89785 \n     44) water<=194.500 6 333.07 8.35880 \n      88) age<=5.00000 3 20.167 1.60880 *\n      89) age>5.00000 3 39.527 15.1088 *\n     45) water>194.500 8 164.01 -1.19786 \n      90) age<=5.00000 2 7.7618 -8.27786 *\n      91) age>5.00000 6 22.573 1.16214 \n       182) cement<=483.000 2 16.704 -0.147864 *\n       183) cement>483.000 4 0.72030 1.81714 *\n    23) fine-aggregate>710.050 16 352.10 -14.2679 \n     46) fine-aggregate<=751.500 10 32.601 -11.1109 \n      92) cement<=391.250 6 0.0065333 -11.8345 \n       184) cement<=382.250 4 0.0000 -11.8579 *\n       185) cement>382.250 2 0.0000 -11.7879 *\n      93) cement>391.250 4 24.739 -10.0254 \n       186) fine-aggregate<=716.600 2 0.0000 -11.4579 *\n       187) fine-aggregate>716.600 2 16.531 -8.59286 *\n     47) fine-aggregate>751.500 6 53.721 -19.5295 \n      94) age<=5.00000 3 0.0054000 -16.7179 *\n      95) age>5.00000 3 6.2833 -22.3412 *\n 3) age>21.0000 505 1.1217e+05 5.65917 \n  6) cement<=313.150 335 47912 0.0855389 \n   12) water<=175.550 96 11041 8.56943 \n    24) coarse-aggregate<=871.300 7 455.61 28.9079 \n     48) cement<=277.500 5 56.046 33.6861 *\n     49) cement>277.500 2 0.0000 16.9621 *\n    25) coarse-aggregate>871.300 89 7462.0 6.96978 \n     50) age<=42.0000 40 3040.8 2.30214 \n      100) cement<=213.050 21 1518.1 -1.63977 \n       200) blast-furnace-slag<=58.8000 10 606.95 -8.12886 \n        400) cement<=159.800 2 10.080 -20.1529 *\n        401) cement>159.800 8 235.42 -5.12286 \n         802) coarse-aggregate<=1005.10 3 0.011267 1.49880 *\n         803) coarse-aggregate>1005.10 5 24.950 -9.09586 \n          1606) water<=163.850 2 11.139 -7.09786 *\n          1607) water>163.850 3 0.50460 -10.4279 *\n       201) blast-furnace-slag>58.8000 11 107.24 4.25941 \n        402) blast-furnace-slag<=172.350 5 23.085 7.10414 \n         804) cement<=166.000 2 1.5842 9.64214 *\n         805) cement>166.000 3 0.029400 5.41214 *\n        403) blast-furnace-slag>172.350 6 9.9729 1.88880 \n         806) cement<=155.800 4 1.1664 1.03214 \n          1612) cement<=150.900 2 0.0000 1.57214 *\n          1613) cement>150.900 2 0.0000 0.492136 *\n         807) cement>155.800 2 0.0000 3.60214 *\n      101) cement>213.050 19 835.80 6.65898 \n       202) water<=156.850 8 387.27 10.1009 \n        404) blast-furnace-slag<=26.9000 5 213.81 7.23014 \n         808) cement<=252.050 3 25.709 2.22214 *\n         809) cement>252.050 2 0.0000 14.7421 *\n        405) blast-furnace-slag>26.9000 3 63.573 14.8855 *\n       203) water>156.850 11 284.83 4.15577 \n        406) water<=158.650 2 0.0000 -5.00786 *\n        407) water>158.650 9 79.565 6.19214 \n         814) cement<=280.550 3 8.8331 9.99547 *\n         815) cement>280.550 6 5.6383 4.29047 \n          1630) cement<=289.850 3 0.0000 5.07214 *\n          1631) cement>289.850 3 1.9723 3.50880 *\n     51) age>42.0000 49 2838.3 10.7801 \n      102) fine-aggregate<=778.800 15 240.66 17.5468 \n       204) fly-ash<=174.450 11 90.011 19.3812 \n        408) coarse-aggregate<=1047.95 7 18.542 17.5093 \n         816) cement<=190.450 4 8.1119 18.4896 \n          1632) age<=78.0000 2 0.0000 17.6021 *\n          1633) age>78.0000 2 4.9613 19.3771 *\n         817) cement>190.450 3 1.4600 16.2021 *\n        409) coarse-aggregate>1047.95 4 4.0137 22.6571 \n         818) fly-ash<=147.800 2 1.5488 21.8721 *\n         819) fly-ash>147.800 2 0.0000 23.4421 *\n       205) fly-ash>174.450 4 11.834 12.5021 \n        410) age<=78.0000 2 0.0000 10.7821 *\n        411) age>78.0000 2 0.0000 14.2221 *\n      103) fine-aggregate>778.800 34 1607.8 7.79478 \n       206) cement<=212.550 22 687.24 4.97895 \n        412) fly-ash<=172.950 20 319.25 3.68564 \n         824) fly-ash<=125.000 13 99.476 5.85444 \n          1648) fine-aggregate<=904.750 11 54.290 6.64941 \n           3296) cement<=181.800 3 0.0000 3.29214 *\n           3297) cement>181.800 8 7.7960 7.90839 \n            6594) cement<=212.250 5 1.9713 8.56414 \n             13188) cement<=203.350 3 0.52807 8.12547 *\n             13189) cement>203.350 2 0.0000 9.22214 *\n            6595) cement>212.250 3 0.091267 6.81547 *\n          1649) fine-aggregate>904.750 2 0.0000 1.48214 *\n         825) fly-ash>125.000 7 45.065 -0.342150 \n          1650) fine-aggregate<=800.750 3 1.7222 -3.14786 *\n          1651) fine-aggregate>800.750 4 2.0144 1.76214 \n           3302) blast-furnace-slag<=6.80000 2 2.0000 1.70214 *\n           3303) blast-furnace-slag>6.80000 2 0.0000 1.82214 *\n        413) fly-ash>172.950 2 0.0000 17.9121 *\n       207) cement>212.550 12 426.29 12.9571 \n        414) water<=152.200 2 0.19845 24.7771 *\n        415) water>152.200 10 90.783 10.5931 \n         830) water<=158.750 2 0.0000 6.17214 *\n         831) water>158.750 8 41.920 11.6984 \n          1662) cement<=293.050 6 15.146 10.7571 \n           3324) age<=78.0000 3 0.0000 9.22214 *\n           3325) age>78.0000 3 1.0086 12.2921 *\n          1663) cement>293.050 2 5.5112 14.5221 *\n   13) water>175.550 239 27186 -3.32222 \n    26) age<=73.0000 176 16117 -6.57133 \n     52) blast-furnace-slag<=13.0000 69 3949.9 -12.7396 \n      104) cement<=201.000 14 594.33 -21.6943 \n       208) age<=42.0000 12 106.01 -24.1054 \n        416) superplasticizer<=11.3500 9 21.374 -25.5923 \n         832) cement<=179.200 6 3.6533 -26.5845 \n          1664) cement<=156.500 3 0.42667 -25.8512 *\n          1665) cement>156.500 3 0.0000 -27.3179 *\n         833) cement>179.200 3 3.7865e-29 -23.6079 *\n        417) superplasticizer>11.3500 3 5.0429 -19.6445 *\n       209) age>42.0000 2 0.0000 -7.22786 *\n      105) cement>201.000 55 1947.2 -10.4602 \n       210) superplasticizer<=4.95000 30 350.00 -14.1359 \n        420) coarse-aggregate<=1107.50 20 151.30 -12.3634 \n         840) fine-aggregate<=771.650 6 51.539 -10.1995 \n          1680) cement<=295.400 2 20.225 -7.49786 *\n          1681) cement>295.400 4 9.4175 -11.5504 *\n         841) fine-aggregate>771.650 14 59.624 -13.2907 \n          1682) cement<=285.000 12 38.584 -13.7912 \n           3364) fine-aggregate<=877.650 10 9.4372 -13.0949 \n            6728) cement<=241.900 7 4.7242 -12.7321 \n             13456) cement<=212.200 3 1.0923 -13.0345 *\n             13457) cement>212.200 4 3.1519 -12.5054 *\n            6729) cement>241.900 3 1.6433 -13.9412 *\n           3365) fine-aggregate>877.650 2 0.054450 -17.2729 *\n          1683) cement>285.000 2 0.0000 -10.2879 *\n        421) coarse-aggregate>1107.50 10 10.202 -17.6809 \n         842) cement<=245.050 7 0.037943 -18.3407 \n          1684) fine-aggregate<=789.150 5 0.0000 -18.3179 *\n          1685) fine-aggregate>789.150 2 0.028800 -18.3979 *\n         843) cement>245.050 3 0.0042667 -16.1412 *\n       211) superplasticizer>4.95000 25 705.53 -6.04946 \n        422) cement<=299.050 17 431.84 -3.90669 \n         844) cement<=233.900 4 32.460 -9.43536 \n          1688) cement<=220.900 2 0.0000 -10.9579 *\n          1689) cement>220.900 2 23.188 -7.91286 *\n         845) cement>233.900 13 239.49 -2.20556 \n          1690) age<=42.0000 10 137.22 -3.69686 \n           3380) cement<=297.000 8 14.348 -4.97036 \n            6760) water<=190.700 4 0.51568 -6.17036 \n             13520) cement<=250.700 2 0.51005 -6.13286 *\n             13521) cement>250.700 2 0.0000 -6.20786 *\n            6761) water>190.700 4 2.3127 -3.77036 \n             13522) cement<=284.500 2 0.53045 -3.10286 *\n             13523) cement>284.500 2 0.0000 -4.43786 *\n           3381) cement>297.000 2 57.996 1.39714 *\n          1691) age>42.0000 3 5.9017 2.76547 *\n        423) cement>299.050 8 29.771 -10.6029 \n         846) cement<=302.500 3 9.4663e-30 -12.0179 *\n         847) cement>302.500 5 20.160 -9.75386 \n          1694) water<=178.050 3 0.0000 -10.7579 *\n          1695) water>178.050 2 12.600 -8.24786 *\n     53) blast-furnace-slag>13.0000 107 7848.4 -2.59366 \n      106) cement<=274.700 85 3332.6 -5.65975 \n       212) cement<=158.900 47 1511.8 -8.03425 \n        424) cement<=142.000 19 344.40 -3.73260 \n         848) fly-ash<=100.500 8 75.322 -7.94786 \n          1696) blast-furnace-slag<=202.700 2 20.352 -12.0779 *\n          1697) blast-furnace-slag>202.700 6 9.4851 -6.57120 \n           3394) cement<=133.050 2 0.0000 -4.82786 *\n           3395) cement>133.050 4 0.36750 -7.44286 *\n         849) fly-ash>100.500 11 23.552 -0.666955 \n          1698) cement<=135.950 4 7.5000e-05 -2.55036 *\n          1699) cement>135.950 7 1.2549 0.409279 \n           3398) fly-ash<=103.150 4 0.0000 0.582136 *\n           3399) fly-ash>103.150 3 0.97607 0.178803 *\n        425) cement>142.000 28 577.27 -10.9532 \n         850) blast-furnace-slag<=183.700 17 150.04 -13.4708 \n          1700) coarse-aggregate<=1011.50 15 75.214 -12.7272 \n           3400) blast-furnace-slag<=116.100 3 9.4663e-30 -15.8679 *\n           3401) blast-furnace-slag>116.100 12 38.225 -11.9420 \n            6802) fly-ash<=102.500 8 19.025 -12.7791 \n             13604) coarse-aggregate<=969.600 5 0.087480 -12.2299 \n              27208) cement<=151.900 3 9.4663e-30 -12.3379 *\n              27209) cement>151.900 2 0.0000 -12.0679 *\n             13605) coarse-aggregate>969.600 3 14.915 -13.6945 *\n            6803) fly-ash>102.500 4 2.3826 -10.2679 \n             13606) fine-aggregate<=756.500 2 0.74420 -10.9079 *\n             13607) fine-aggregate>756.500 2 0.0000 -9.62786 *\n          1701) coarse-aggregate>1011.50 2 4.3218 -19.0479 *\n         851) blast-furnace-slag>183.700 11 152.96 -7.06241 \n          1702) blast-furnace-slag<=237.100 5 13.977 -3.58186 \n           3404) blast-furnace-slag<=222.250 2 8.2418 -4.83786 *\n           3405) blast-furnace-slag>222.250 3 0.47707 -2.74453 *\n          1703) blast-furnace-slag>237.100 6 27.937 -9.96286 *\n       213) cement>158.900 38 1228.0 -2.72286 \n        426) coarse-aggregate<=1019.50 33 794.46 -1.58241 \n         852) blast-furnace-slag<=271.400 29 658.20 -2.31580 \n          1704) coarse-aggregate<=834.000 2 2.2898 4.61214 *\n          1705) coarse-aggregate>834.000 27 552.80 -2.82898 \n           3410) coarse-aggregate<=977.200 19 195.99 -4.09313 \n            6820) cement<=244.750 12 124.94 -5.44786 \n             13640) blast-furnace-slag<=124.500 2 9.4612 -9.40286 *\n             13641) blast-furnace-slag>124.500 10 77.940 -4.65686 \n              27282) fine-aggregate<=652.500 2 19.158 -8.87286 *\n              27283) fine-aggregate>652.500 8 14.345 -3.60286 \n               54566) blast-furnace-slag<=137.150 2 0.0000 -5.41786 *\n               54567) blast-furnace-slag>137.150 6 5.5608 -2.99786 \n                109134) water<=196.500 4 0.77440 -2.53786 \n                 218268) cement<=199.000 2 0.0000 -2.09786 *\n                 218269) cement>199.000 2 0.0000 -2.97786 *\n                109135) water>196.500 2 2.2472 -3.91786 *\n            6821) cement>244.750 7 11.273 -1.77072 \n             13642) coarse-aggregate<=899.600 5 0.12288 -2.32986 \n              27284) cement<=257.000 3 0.0000 -2.45786 *\n              27285) cement>257.000 2 0.0000 -2.13786 *\n             13643) coarse-aggregate>899.600 2 5.6785 -0.372864 *\n           3411) coarse-aggregate>977.200 8 254.33 0.173386 \n            6822) blast-furnace-slag<=168.950 3 57.536 6.53880 *\n            6823) blast-furnace-slag>168.950 5 2.3075 -3.64586 \n             13646) cement<=215.950 3 6.6667e-05 -3.09120 *\n             13647) cement>215.950 2 0.0000 -4.47786 *\n         853) blast-furnace-slag>271.400 4 7.5815 3.73464 \n          1706) cement<=225.150 2 7.4884 3.88714 *\n          1707) cement>225.150 2 0.0000 3.58214 *\n        427) coarse-aggregate>1019.50 5 107.36 -10.2499 \n         854) cement<=203.500 2 33.048 -14.1929 *\n         855) cement>203.500 3 22.485 -7.62120 *\n      107) cement>274.700 22 629.41 9.25259 \n       214) superplasticizer<=9.40000 19 442.46 8.09424 \n        428) fly-ash<=100.450 16 234.78 6.86276 \n         856) blast-furnace-slag<=137.000 10 28.042 8.19414 \n          1712) cement<=288.700 8 4.7131 7.45089 \n           3424) blast-furnace-slag<=120.750 6 0.40048 7.87380 \n            6848) water<=189.100 2 0.11520 8.18214 *\n            6849) water>189.100 4 7.5000e-05 7.71964 *\n           3425) blast-furnace-slag>120.750 2 0.020000 6.18214 *\n          1713) cement>288.700 2 1.2325 11.1671 *\n         857) blast-furnace-slag>137.000 6 159.47 4.64380 \n          1714) cement<=304.650 2 0.072200 -2.62786 *\n          1715) cement>304.650 4 0.76507 8.27964 *\n        429) fly-ash>100.450 3 54.000 14.6621 *\n       215) superplasticizer>9.40000 3 6.6667e-05 16.5888 *\n    27) age>73.0000 63 4021.2 5.75468 \n     54) fine-aggregate<=792.750 38 1595.6 10.3371 \n      108) blast-furnace-slag<=38.0000 6 155.07 2.85547 \n       216) superplasticizer<=5.15000 2 17.701 -3.49286 *\n       217) superplasticizer>5.15000 4 16.464 6.02964 \n        434) coarse-aggregate<=1036.00 2 0.19845 8.03714 *\n        435) coarse-aggregate>1036.00 2 0.14580 4.02214 *\n      109) blast-furnace-slag>38.0000 32 1041.7 11.7399 \n       218) blast-furnace-slag<=207.750 24 315.23 14.0263 \n        436) age<=95.0000 10 133.98 11.1011 \n         872) cement<=213.000 3 0.0000 6.47214 *\n         873) cement>213.000 7 42.148 13.0850 \n          1746) cement<=285.000 4 0.56250 11.5471 \n           3492) cement<=251.000 2 0.0000 11.9221 *\n           3493) cement>251.000 2 0.0000 11.1721 *\n          1747) cement>285.000 3 19.512 15.1355 *\n        437) age>95.0000 14 34.563 16.1157 \n         874) superplasticizer<=6.80000 11 20.393 15.5903 \n          1748) age<=317.500 8 7.7581 14.9446 \n           3496) age<=225.000 4 3.4147 14.2846 \n            6992) cement<=285.000 2 0.80645 13.4771 *\n            6993) cement>285.000 2 0.0000 15.0921 *\n           3497) age>225.000 4 0.85868 15.6046 *\n          1749) age>317.500 3 0.40560 17.3121 *\n         875) superplasticizer>6.80000 3 0.0000 18.0421 *\n       219) blast-furnace-slag>207.750 8 224.62 4.88089 \n        438) blast-furnace-slag<=243.850 6 60.476 2.55547 \n         876) cement<=197.250 3 9.2256 5.04214 *\n         877) cement>197.250 3 14.149 0.0688026 *\n        439) blast-furnace-slag>243.850 2 34.362 11.8571 *\n     55) fine-aggregate>792.750 25 414.72 -1.21066 \n      110) coarse-aggregate<=969.000 16 233.30 -3.03786 \n       220) fly-ash<=47.8500 14 82.681 -4.19715 \n        440) fine-aggregate<=859.900 7 17.280 -2.67501 \n         880) cement<=153.000 2 5.7800 -0.967864 *\n         881) cement>153.000 5 3.3398 -3.35786 \n          1762) water<=192.500 3 3.0950 -3.50786 *\n          1763) water>192.500 2 0.076050 -3.13286 *\n        441) fine-aggregate>859.900 7 32.964 -5.71929 \n         882) cement<=271.500 4 13.379 -7.16786 \n          1764) cement<=203.500 2 11.045 -7.18786 *\n          1765) cement>203.500 2 2.3328 -7.14786 *\n         883) cement>271.500 3 0.0000 -3.78786 *\n       221) fly-ash>47.8500 2 0.10125 5.07714 *\n      111) coarse-aggregate>969.000 9 33.035 2.03769 \n       222) cement<=254.300 3 6.8521 3.85880 *\n       223) cement>254.300 6 11.259 1.12714 \n        446) age<=105.000 2 0.58320 -0.637864 *\n        447) age>105.000 4 1.3297 2.00964 *\n  7) cement>313.150 170 33346 16.6425 \n   14) water<=178.250 68 7097.6 27.2442 \n    28) blast-furnace-slag<=177.700 52 4713.2 24.6373 \n     56) superplasticizer<=6.10000 7 114.52 36.2979 \n      112) coarse-aggregate<=1080.00 3 78.104 38.3255 *\n      113) coarse-aggregate>1080.00 4 14.832 34.7771 \n       226) age<=104.000 2 10.951 33.7921 *\n       227) age>104.000 2 0.0000 35.7621 *\n     57) superplasticizer>6.10000 45 3498.9 22.8235 \n      114) age<=42.0000 24 1748.3 18.2455 \n       228) blast-furnace-slag<=21.0000 9 291.61 11.1510 \n        456) superplasticizer<=10.8500 3 5.6454 4.54214 *\n        457) superplasticizer>10.8500 6 89.417 14.4555 \n         914) cement<=386.000 3 45.051 16.9021 *\n         915) cement>386.000 3 8.4491 12.0088 *\n       229) blast-furnace-slag>21.0000 15 731.90 22.5021 \n        458) blast-furnace-slag<=23.0000 3 67.335 32.8921 *\n        459) blast-furnace-slag>23.0000 12 259.74 19.9046 \n         918) coarse-aggregate<=924.300 4 12.048 23.7721 \n          1836) cement<=400.000 2 10.306 23.1121 *\n          1837) cement>400.000 2 0.0000 24.4321 *\n         919) coarse-aggregate>924.300 8 157.95 17.9709 \n          1838) cement<=367.750 2 0.0000 23.1421 *\n          1839) cement>367.750 6 86.635 16.2471 \n           3678) superplasticizer<=10.9500 2 0.0000 17.5321 *\n           3679) superplasticizer>10.9500 4 81.682 15.6046 \n            7358) cement<=412.750 2 0.0000 16.3421 *\n            7359) cement>412.750 2 79.506 14.8671 *\n      115) age>42.0000 21 672.76 28.0555 \n       230) cement<=395.200 9 139.30 23.4177 \n        460) cement<=377.250 3 12.212 28.0688 *\n        461) cement>377.250 6 29.742 21.0921 \n         922) superplasticizer<=13.2000 2 7.4498 23.6721 *\n         923) superplasticizer>13.2000 4 2.3232 19.8021 *\n       231) cement>395.200 12 194.69 31.5338 \n        462) fine-aggregate<=869.600 9 100.41 32.9310 \n         924) water<=149.400 5 22.688 35.5221 *\n         925) water>149.400 4 2.1900 29.6921 *\n        463) fine-aggregate>869.600 3 24.000 27.3421 *\n    29) blast-furnace-slag>177.700 16 882.54 35.7165 \n     58) blast-furnace-slag<=189.100 10 304.32 40.1721 \n      116) water<=169.900 8 134.99 42.2296 \n       232) age<=73.5000 4 18.040 38.5421 \n        464) cement<=376.250 2 18.000 38.4421 *\n        465) cement>376.250 2 0.0000 38.6421 *\n       233) age>73.5000 4 8.1675 45.9171 *\n      117) water>169.900 2 0.0000 31.9421 *\n     59) blast-furnace-slag>189.100 6 48.816 28.2905 \n      118) age<=42.0000 2 0.83205 24.5871 *\n      119) age>42.0000 4 6.8400 30.1421 \n       238) cement<=316.050 2 0.0000 29.0421 *\n       239) cement>316.050 2 2.0000 31.2421 *\n   15) water>178.250 102 13511 9.57468 \n    30) blast-furnace-slag<=156.600 90 7142.2 6.82347 \n     60) cement<=455.500 70 3320.7 4.06171 \n      120) fine-aggregate<=714.350 26 979.09 8.89944 \n       240) fine-aggregate<=651.500 14 117.27 5.28499 \n        480) cement<=333.250 3 37.264 2.09214 *\n        481) cement>333.250 11 41.081 6.15577 \n         962) cement<=357.000 2 0.0000 8.47214 *\n         963) cement>357.000 9 27.965 5.64102 \n          1926) age<=135.000 4 9.6017 4.16464 \n           3852) cement<=403.750 2 0.0000 4.70214 *\n           3853) cement>403.750 2 8.4460 3.62714 *\n          1927) age>135.000 5 2.6694 6.82214 \n           3854) age<=225.000 2 0.0000 5.98214 *\n           3855) age>225.000 3 0.31740 7.38214 *\n       241) fine-aggregate>651.500 12 465.54 13.1163 \n        482) cement<=318.000 5 64.261 6.41414 \n         964) cement<=313.650 3 12.042 3.77547 *\n         965) cement>313.650 2 0.0000 10.3721 *\n        483) cement>318.000 7 16.256 17.9036 \n         966) age<=272.500 4 0.30927 17.0246 \n          1932) age<=135.000 2 0.12005 16.8071 *\n          1933) age>135.000 2 0.0000 17.2421 *\n         967) age>272.500 3 8.7363 19.0755 *\n      121) fine-aggregate>714.350 44 1373.6 1.20305 \n       242) coarse-aggregate<=1062.50 41 1092.2 1.81165 \n        484) water<=194.500 30 441.81 3.28447 \n         968) water<=182.200 3 10.349 7.69880 *\n         969) water>182.200 27 366.51 2.79399 \n          1938) age<=59.0000 19 216.07 1.71371 \n           3876) cement<=353.000 5 19.907 -2.08186 \n            7752) water<=189.000 2 4.4402 -0.0778641 *\n            7753) water>189.000 3 2.0798 -3.41786 *\n           3877) cement>353.000 14 98.407 3.06928 \n            7754) water<=186.500 5 36.542 0.648136 \n             15508) cement<=391.000 2 23.530 -1.07786 *\n             15509) cement>391.000 3 3.0817 1.79880 *\n            7755) water>186.500 9 16.272 4.41436 \n             15510) water<=191.000 2 10.811 5.51714 *\n             15511) water>191.000 7 2.3337 4.09928 \n              31022) cement<=374.500 2 0.0000 5.01214 *\n              31023) cement>374.500 5 0.00048000 3.73414 \n               62046) coarse-aggregate<=940.300 2 0.0000 3.72214 *\n               62047) coarse-aggregate>940.300 3 0.0000 3.74214 *\n          1939) age>59.0000 8 75.603 5.35964 \n           3878) coarse-aggregate<=1001.50 3 38.608 7.91880 *\n           3879) coarse-aggregate>1001.50 5 5.5579 3.82414 \n            7758) coarse-aggregate<=1051.50 3 1.6643 3.10547 *\n            7759) coarse-aggregate>1051.50 2 0.020000 4.90214 *\n        485) water>194.500 11 407.83 -2.20514 \n         970) coarse-aggregate<=988.750 8 191.31 -4.34661 \n          1940) water<=201.000 5 38.194 -1.16386 \n           3880) age<=59.0000 3 33.223 -1.90786 *\n           3881) age>59.0000 2 0.81920 -0.0478641 *\n          1941) water>201.000 3 18.055 -9.65120 *\n         971) coarse-aggregate>988.750 3 81.992 3.50547 *\n       243) coarse-aggregate>1062.50 3 58.658 -7.11453 *\n     61) cement>455.500 20 1418.8 16.4896 \n      122) superplasticizer<=3.45000 13 553.42 12.2714 \n       244) water<=190.500 3 5.3771 21.9755 *\n       245) water>190.500 10 180.78 9.36014 \n        490) cement<=477.500 3 5.0251 5.25880 *\n        491) cement>477.500 7 103.67 11.1179 \n         982) age<=59.0000 4 0.024475 8.21464 \n          1964) cement<=500.050 2 0.011250 8.15714 *\n          1965) cement>500.050 2 0.0000 8.27214 *\n         983) age>59.0000 3 24.978 14.9888 *\n      123) superplasticizer>3.45000 7 204.51 24.3236 \n       246) coarse-aggregate<=867.050 2 54.497 31.2221 *\n       247) coarse-aggregate>867.050 5 16.760 21.5641 \n        494) age<=42.0000 3 1.0923 20.1188 *\n        495) age>42.0000 2 0.0000 23.7321 *\n    31) blast-furnace-slag>156.600 12 577.97 30.2088 \n     62) cement<=322.500 4 0.0000 21.3621 *\n     63) cement>322.500 8 108.39 34.6321 \n      126) superplasticizer<=8.65000 2 0.0000 30.0521 *\n      127) superplasticizer>8.65000 6 52.448 36.1588 \n       254) cement<=381.350 2 0.0000 38.8421 *\n       255) cement>381.350 4 30.847 34.8171 *"])
+```
+:::
+
+
+
+### Random Forest
+
+
+::: {.sourceClojure}
+```clojure
+(def best-val-random-forest
+  (-> (second tree-models)
+      best-models
+      reverse))
+```
+:::
+
+
+
+#### RF summary
+
+
+::: {.sourceClojure}
+```clojure
+(-> best-val-random-forest first :summary)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+#object[smile.regression.RandomForest 0x4a6b6ae1 "smile.regression.RandomForest@4a6b6ae1"]
+
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> best-val-random-forest first :metric)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+0.9440341752168289
+
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> best-val-random-forest first :other-metrices)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+({:name :mae,
+  :metric-fn
+  #object[scicloj.ml.core$mae 0x16c47c75 "scicloj.ml.core$mae@16c47c75"],
+  :metric 2.6554691444668745}
+ {:name :rmse,
+  :metric-fn
+  #object[scicloj.ml.core$rmse 0x10e78cbb "scicloj.ml.core$rmse@10e78cbb"],
+  :metric 4.277773520840032})
+
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> best-val-random-forest first :params)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+{:model-type :smile.regression/random-forest,
+ :trees 667,
+ :max-depth 24,
+ :max-nodes 590,
+ :node-size 2,
+ :sample-rate 0.8999999999999999}
+
+```
+:::
+
+
+Same (potential) overfitting idea here.
+
+## Build final models for evaluation
+
+### Gradient tree
+
+
+::: {.sourceClojure}
+```clojure
+(def final-model-gradient-tree
+  (-> (evaluate-pipe
+        [(-> best-val-gradient-tree first :params
+             gradient-tree-pipe-fn)]
+        (train-test concrete-data))
+      best-models))
+```
+:::
+
+
+
+#### GT FINAL
+
+
+::: {.sourceClojure}
+```clojure
+(-> final-model-gradient-tree first :summary)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+#object[smile.regression.GradientTreeBoost 0x7af548ba "smile.regression.GradientTreeBoost@7af548ba"]
+
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> final-model-gradient-tree first :metric)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+0.8476263919153821
+
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> final-model-gradient-tree first :other-metrices)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+({:name :mae,
+  :metric-fn
+  #object[scicloj.ml.core$mae 0x16c47c75 "scicloj.ml.core$mae@16c47c75"],
+  :metric 7.863153960428227}
+ {:name :rmse,
+  :metric-fn
+  #object[scicloj.ml.core$rmse 0x10e78cbb "scicloj.ml.core$rmse@10e78cbb"],
+  :metric 9.688235155349513})
+
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> final-model-gradient-tree first :params)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+{:model-type :smile.regression/gradient-tree-boost,
+ :trees 1,
+ :loss :least-squares,
+ :max-depth 37,
+ :max-nodes 829,
+ :node-size 2,
+ :shrinkage 0.49090909090909096,
+ :sample-rate 0.8999999999999999}
+
+```
+:::
+
+
+
+### Learning curve
+
+
+::: {.sourceClojure}
+```clojure
+^kind/vega
+(ml-viz/learnining-curve (-> concrete-data train-test first :train)
+                         (-> best-val-gradient-tree first :params
+                             gradient-tree-pipe-fn)
+                         [0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1]
+                         {:k                5
+                          :metric-fn        ml/mae
+                          :loss-or-accuracy :loss}
+                         {:YSCALE      {:zero false}
+                          :TRAIN-COLOR "green"
+                          :TEST-COLOR  "red"
+                          :TITLE       "Learning Curve"
+                          :YTITLE      "MAE"})
+```
+:::
+
+
+<div style="max-height:600px;overflow-y:auto;"><div><script>vegaEmbed(document.currentScript.parentElement, {"width":400,"background":"floralwhite","title":{"text":"Learning Curve"},"layer":[{"mark":"errorband","encoding":{"y":{"scale":{"zero":false},"field":"metric-train-min","type":"quantitative","axis":{"title":"MAE"}},"color":{"value":"red"},"x":{"field":"train-ds-size","type":"quantitative"},"y2":{"field":"metric-train-max","legend":null}}},{"mark":"errorband","encoding":{"y":{"scale":{"zero":false},"field":"metric-test-min","type":"quantitative","axis":{"title":"MAE"}},"color":{"value":"green"},"x":{"field":"train-ds-size","type":"quantitative"},"y2":{"field":"metric-test-max","legend":null}}},{"mark":{"type":"line","point":true,"tooltip":true},"encoding":{"y":{"scale":{"zero":false},"field":"metric","type":"quantitative","axis":{"title":"MAE"}},"color":{"field":"train-test-metric","type":"nominal","scale":{"range":["green","red"]},"legend":{"labelExpr":"datum.label == 'metric-test' ? 'Cross validation metric' : datum.label == 'metric-train' ? 'Training score' : ''  "}},"x":{"field":"train-ds-size","type":"quantitative"}}}],"height":300,"data":{"values":[{"metric-test-min":7.240950452071237,"test-ds-size":206,"metric-test-max":7.671657563144908,"metric-train-max":7.112110935926966,"$group-name":"8","train-ds-size":742,"metric-train-min":6.923117482613751,"train-test-metric":"metric-test","metric":7.456304007608073},{"metric-test-min":7.147115894848505,"test-ds-size":206,"metric-test-max":7.932594452799047,"metric-train-max":7.091317701708918,"$group-name":"7","train-ds-size":659,"metric-train-min":6.872576727591254,"train-test-metric":"metric-test","metric":7.539855173823776},{"metric-test-min":7.202662338675726,"test-ds-size":206,"metric-test-max":7.838996765246085,"metric-train-max":7.063920121477783,"$group-name":"9","train-ds-size":824,"metric-train-min":6.8907312508010685,"train-test-metric":"metric-test","metric":7.520829551960905},{"metric-test-min":7.417645876072779,"test-ds-size":206,"metric-test-max":8.050804354349072,"metric-train-max":7.142196047507211,"$group-name":"4","train-ds-size":412,"metric-train-min":6.803920803365536,"train-test-metric":"metric-test","metric":7.734225115210926},{"metric-test-min":7.561120900717595,"test-ds-size":206,"metric-test-max":8.168436371566077,"metric-train-max":7.110419664006425,"$group-name":"6","train-ds-size":577,"metric-train-min":6.807894390308739,"train-test-metric":"metric-test","metric":7.8647786361418355},{"metric-test-min":7.541229386821927,"test-ds-size":206,"metric-test-max":8.102552997875641,"metric-train-max":7.189935199650077,"$group-name":"5","train-ds-size":494,"metric-train-min":6.93099778260738,"train-test-metric":"metric-test","metric":7.821891192348784},{"metric-test-min":8.018449509101552,"test-ds-size":206,"metric-test-max":8.964434140411944,"metric-train-max":7.483536045501463,"$group-name":"2","train-ds-size":247,"metric-train-min":7.037578004139499,"train-test-metric":"metric-test","metric":8.491441824756748},{"metric-test-min":8.023070973986211,"test-ds-size":206,"metric-test-max":8.822746999214466,"metric-train-max":7.394581020656966,"$group-name":"3","train-ds-size":330,"metric-train-min":6.929297647011454,"train-test-metric":"metric-test","metric":8.422908986600339},{"metric-test-min":8.756864064876865,"test-ds-size":206,"metric-test-max":9.348936122343982,"metric-train-max":8.050756314963255,"$group-name":"1","train-ds-size":165,"metric-train-min":7.050291118044512,"train-test-metric":"metric-test","metric":9.052900093610424},{"metric-test-min":9.267133681162637,"test-ds-size":206,"metric-test-max":10.607272109636664,"metric-train-max":7.496175691351904,"$group-name":"0","train-ds-size":82,"metric-train-min":6.790139759407926,"train-test-metric":"metric-test","metric":9.93720289539965},{"metric-test-min":7.240950452071237,"test-ds-size":206,"metric-test-max":7.671657563144908,"metric-train-max":7.112110935926966,"$group-name":"8","train-ds-size":742,"metric-train-min":6.923117482613751,"train-test-metric":"metric-train","metric":7.017614209270358},{"metric-test-min":7.147115894848505,"test-ds-size":206,"metric-test-max":7.932594452799047,"metric-train-max":7.091317701708918,"$group-name":"7","train-ds-size":659,"metric-train-min":6.872576727591254,"train-test-metric":"metric-train","metric":6.981947214650086},{"metric-test-min":7.202662338675726,"test-ds-size":206,"metric-test-max":7.838996765246085,"metric-train-max":7.063920121477783,"$group-name":"9","train-ds-size":824,"metric-train-min":6.8907312508010685,"train-test-metric":"metric-train","metric":6.977325686139426},{"metric-test-min":7.417645876072779,"test-ds-size":206,"metric-test-max":8.050804354349072,"metric-train-max":7.142196047507211,"$group-name":"4","train-ds-size":412,"metric-train-min":6.803920803365536,"train-test-metric":"metric-train","metric":6.973058425436373},{"metric-test-min":7.561120900717595,"test-ds-size":206,"metric-test-max":8.168436371566077,"metric-train-max":7.110419664006425,"$group-name":"6","train-ds-size":577,"metric-train-min":6.807894390308739,"train-test-metric":"metric-train","metric":6.959157027157582},{"metric-test-min":7.541229386821927,"test-ds-size":206,"metric-test-max":8.102552997875641,"metric-train-max":7.189935199650077,"$group-name":"5","train-ds-size":494,"metric-train-min":6.93099778260738,"train-test-metric":"metric-train","metric":7.060466491128729},{"metric-test-min":8.018449509101552,"test-ds-size":206,"metric-test-max":8.964434140411944,"metric-train-max":7.483536045501463,"$group-name":"2","train-ds-size":247,"metric-train-min":7.037578004139499,"train-test-metric":"metric-train","metric":7.260557024820481},{"metric-test-min":8.023070973986211,"test-ds-size":206,"metric-test-max":8.822746999214466,"metric-train-max":7.394581020656966,"$group-name":"3","train-ds-size":330,"metric-train-min":6.929297647011454,"train-test-metric":"metric-train","metric":7.16193933383421},{"metric-test-min":8.756864064876865,"test-ds-size":206,"metric-test-max":9.348936122343982,"metric-train-max":8.050756314963255,"$group-name":"1","train-ds-size":165,"metric-train-min":7.050291118044512,"train-test-metric":"metric-train","metric":7.550523716503884},{"metric-test-min":9.267133681162637,"test-ds-size":206,"metric-test-max":10.607272109636664,"metric-train-max":7.496175691351904,"$group-name":"0","train-ds-size":82,"metric-train-min":6.790139759407926,"train-test-metric":"metric-train","metric":7.143157725379915}]}});</script></div></div>
+
+Indeed, we find a wide gap at the beginning of the plot. Recall that a wide gap indicates higher variance. Eventually, by including 100% of the training data, the gap narrows.
+
+
+::: {.sourceClojure}
+```clojure
+(-> final-model-gradient-tree first :summary .trees seq)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+(#object[smile.regression.RegressionTree 0x165402f "n=927\nnode), split, n, loss, yval, (yprob)\n* denotes terminal node\n1) root 927 2.6248e+05 -0.150076 \n 2) age&lt;=21.0000 268 42332 -13.3558 \n  4) cement&lt;=354.500 191 15495 -18.2940 \n   8) age&lt;=10.5000 142 6732.1 -21.4664 \n    16) cement&lt;=255.250 94 2580.8 -24.1078 \n     32) water&lt;=188.900 45 773.44 -21.4480 \n      64) coarse-aggregate&lt;=1016.95 21 229.28 -19.1455 \n       128) fine-aggregate&lt;=900.800 17 120.88 -18.0473 \n        256) coarse-aggregate&lt;=982.400 4 3.7686 -15.5155 \n         512) cement&lt;=233.050 2 0.0050000 -14.5455 *\n         513) cement&gt;233.050 2 0.0000 -16.4855 *\n        257) coarse-aggregate&gt;982.400 13 83.583 -18.8263 \n         514) water&lt;=157.450 3 0.29687 -15.0522 *\n         515) water&gt;157.450 10 27.736 -19.9585 \n          1030) water&lt;=177.700 6 0.77493 -21.0422 \n           2060) fly-ash&lt;=144.250 4 0.17640 -21.2655 \n            4120) cement&lt;=208.250 2 0.0000 -21.4755 *\n            4121) cement&gt;208.250 2 0.0000 -21.0555 *\n           2061) fly-ash&gt;144.250 2 0.0000 -20.5955 *\n          1031) water&gt;177.700 4 9.3457 -18.3330 *\n       129) fine-aggregate&gt;900.800 4 0.75427 -23.8130 \n        258) coarse-aggregate&lt;=1005.10 2 0.66125 -23.6605 *\n        259) coarse-aggregate&gt;1005.10 2 0.0000 -23.9655 *\n      65) coarse-aggregate&gt;1016.95 24 335.42 -23.4626 \n       130) water&lt;=159.100 3 19.482 -16.2789 *\n       131) water&gt;159.100 21 139.01 -24.4889 \n        262) cement&lt;=188.250 6 27.740 -26.8672 \n         524) cement&lt;=181.700 3 8.5281 -25.0922 *\n         525) cement&gt;181.700 3 0.30827 -28.6422 *\n        263) cement&gt;188.250 15 63.752 -23.5375 \n         526) coarse-aggregate&lt;=1111.30 10 28.064 -22.4655 \n          1052) superplasticizer&lt;=6.80000 6 0.89780 -23.3655 \n           2104) cement&lt;=250.700 4 0.32408 -23.5480 \n            4208) blast-furnace-slag&lt;=49.0500 2 0.033800 -23.8155 *\n            4209) blast-furnace-slag&gt;49.0500 2 0.0040500 -23.2805 *\n           2105) cement&gt;250.700 2 0.17405 -23.0005 *\n          1053) superplasticizer&gt;6.80000 4 15.016 -21.1155 \n           2106) cement&lt;=202.100 2 3.1000 -22.6205 *\n           2107) cement&gt;202.100 2 2.8561 -19.6105 *\n         527) coarse-aggregate&gt;1111.30 5 1.2123 -25.6815 \n          1054) coarse-aggregate&lt;=1115.90 2 0.048050 -25.0905 *\n          1055) coarse-aggregate&gt;1115.90 3 0.0000 -26.0755 *\n     33) water&gt;188.900 49 1196.6 -26.5504 \n      66) age&lt;=5.00000 33 285.01 -29.0195 \n       132) cement&lt;=217.200 17 38.576 -31.2802 \n        264) cement&lt;=127.800 5 5.0311 -32.9915 \n         528) cement&lt;=105.150 2 0.0000 -31.8455 *\n         529) cement&gt;105.150 3 0.65340 -33.7555 *\n        265) cement&gt;127.800 12 12.801 -30.5672 \n         530) cement&lt;=159.900 6 3.6083 -31.2689 \n          1060) cement&lt;=147.150 3 2.8017 -30.9022 *\n          1061) cement&gt;147.150 3 0.0000 -31.6355 *\n         531) cement&gt;159.900 6 3.2844 -29.8655 \n          1062) cement&lt;=178.450 3 0.0010667 -29.4889 *\n          1063) cement&gt;178.450 3 2.4321 -30.2422 *\n       133) cement&gt;217.200 16 67.226 -26.6174 \n        266) coarse-aggregate&lt;=970.300 12 29.846 -27.4772 \n         532) cement&lt;=234.900 3 0.96000 -25.2355 *\n         533) cement&gt;234.900 9 8.7857 -28.2244 \n          1066) cement&lt;=243.000 2 0.0000 -29.9455 *\n          1067) cement&gt;243.000 7 1.1685 -27.7327 \n           2134) water&lt;=195.000 5 0.067280 -27.9835 *\n           2135) water&gt;195.000 2 0.0000 -27.1055 *\n        267) coarse-aggregate&gt;970.300 4 1.8961 -24.0380 *\n      67) age&gt;5.00000 16 295.54 -21.4580 \n       134) fine-aggregate&lt;=732.300 4 4.5369 -16.0005 \n        268) cement&lt;=221.100 2 0.0000 -14.9355 *\n        269) cement&gt;221.100 2 0.0000 -17.0655 *\n       135) fine-aggregate&gt;732.300 12 132.15 -23.2772 \n        270) fine-aggregate&lt;=844.100 8 59.416 -21.6230 \n         540) cement&lt;=149.150 5 10.463 -23.2235 \n          1080) cement&lt;=136.300 3 0.0000 -22.7555 *\n          1081) cement&gt;136.300 2 8.8200 -23.9255 *\n         541) cement&gt;149.150 3 14.799 -18.9555 *\n        271) fine-aggregate&gt;844.100 4 7.0634 -26.5855 \n         542) water&lt;=192.500 2 0.68445 -25.6105 *\n         543) water&gt;192.500 2 2.5765 -27.5605 *\n    17) cement&gt;255.250 48 2211.1 -16.2937 \n     34) water&lt;=177.250 11 436.35 -7.68008 \n      68) age&lt;=5.00000 9 92.232 -10.2722 \n       136) fly-ash&lt;=60.0500 5 24.563 -7.83553 \n        272) cement&lt;=281.750 2 0.0000 -5.96553 *\n        273) cement&gt;281.750 3 12.907 -9.08220 *\n       137) fly-ash&gt;60.0500 4 0.87408 -13.3180 \n        274) cement&lt;=283.750 2 0.21780 -12.9455 *\n        275) cement&gt;283.750 2 0.10125 -13.6905 *\n      69) age&gt;5.00000 2 11.520 3.98447 *\n     35) water&gt;177.250 37 715.98 -18.8545 \n      70) age&lt;=5.00000 13 34.705 -22.7378 \n       140) fine-aggregate&lt;=837.800 11 11.424 -22.1810 \n        280) water&lt;=192.500 9 6.7080 -21.8800 \n         560) coarse-aggregate&lt;=905.500 3 0.0096000 -22.9355 *\n         561) coarse-aggregate&gt;905.500 6 1.6845 -21.3522 \n          1122) cement&lt;=340.000 2 1.6200 -21.2055 *\n          1123) cement&gt;340.000 4 0.0000 -21.4255 *\n        281) water&gt;192.500 2 0.23120 -23.5355 *\n       141) fine-aggregate&gt;837.800 2 1.1101 -25.8005 *\n      71) age&gt;5.00000 24 379.03 -16.7510 \n       142) coarse-aggregate&lt;=969.000 9 66.223 -12.7911 \n        284) cement&lt;=335.750 6 34.516 -11.4639 \n         568) blast-furnace-slag&lt;=167.250 4 28.367 -10.7480 *\n         569) blast-furnace-slag&gt;167.250 2 0.0000 -12.8955 *\n        285) cement&gt;335.750 3 0.0000 -15.4455 *\n       143) coarse-aggregate&gt;969.000 15 87.006 -19.1269 \n        286) fine-aggregate&lt;=761.650 4 12.522 -16.4030 \n         572) cement&lt;=281.500 2 3.2005 -17.9105 *\n         573) cement&gt;281.500 2 0.23120 -14.8955 *\n        287) fine-aggregate&gt;761.650 11 34.015 -20.1174 \n         574) cement&lt;=340.000 9 11.049 -20.7633 \n          1148) cement&lt;=302.900 4 0.29560 -21.7455 \n           2296) cement&lt;=295.400 2 0.18000 -21.9155 *\n           2297) cement&gt;295.400 2 0.0000 -21.5755 *\n          1149) cement&gt;302.900 5 3.8073 -19.9775 \n           2298) coarse-aggregate&lt;=995.000 3 1.0753 -20.5789 *\n           2299) coarse-aggregate&gt;995.000 2 0.020000 -19.0755 *\n         575) cement&gt;340.000 2 2.3113 -17.2105 *\n   9) age&gt;10.5000 49 3192.3 -9.10043 \n    18) superplasticizer&lt;=10.8000 39 1444.7 -11.7896 \n     36) superplasticizer&lt;=6.80000 19 349.25 -14.8108 \n      72) fine-aggregate&lt;=873.100 16 207.04 -13.6724 \n       144) water&lt;=190.700 5 96.665 -10.8315 \n        288) fly-ash&lt;=107.000 2 25.063 -15.0355 *\n        289) fly-ash&gt;107.000 3 12.689 -8.02887 *\n       145) water&gt;190.700 11 51.685 -14.9637 \n        290) coarse-aggregate&lt;=971.000 2 12.005 -11.8255 *\n        291) coarse-aggregate&gt;971.000 9 15.606 -15.6611 \n         582) cement&lt;=229.850 3 0.0000 -14.0955 *\n         583) cement&gt;229.850 6 4.5771 -16.4439 \n          1166) superplasticizer&lt;=5.20000 4 2.8519 -16.8230 *\n          1167) superplasticizer&gt;5.20000 2 0.0000 -15.6855 *\n      73) fine-aggregate&gt;873.100 3 10.881 -20.8822 *\n     37) superplasticizer&gt;6.80000 20 757.29 -8.91953 \n      74) cement&lt;=213.150 12 202.99 -13.0722 \n       148) cement&lt;=177.600 2 6.2658 -5.09553 *\n       149) cement&gt;177.600 10 44.020 -14.6675 \n        298) cement&lt;=201.650 8 11.223 -15.5730 \n         596) water&lt;=164.350 2 1.3778 -14.5255 *\n         597) water&gt;164.350 6 6.9189 -15.9222 \n          1194) cement&lt;=186.150 3 0.0066667 -14.8489 *\n          1195) cement&gt;186.150 3 0.0000 -16.9955 *\n        299) cement&gt;201.650 2 0.0000 -11.0455 *\n      75) cement&gt;213.150 8 36.956 -2.69053 \n       150) blast-furnace-slag&lt;=49.0500 6 7.2965 -1.57887 \n        300) cement&lt;=293.050 4 0.88360 -2.21553 \n         600) cement&lt;=252.050 2 0.0000 -2.68553 *\n         601) cement&gt;252.050 2 0.0000 -1.74553 *\n        301) cement&gt;293.050 2 1.5488 -0.305534 *\n       151) blast-furnace-slag&gt;49.0500 2 0.0000 -6.02553 *\n    19) superplasticizer&gt;10.8000 10 365.61 1.38747 \n     38) cement&lt;=264.450 6 135.45 -2.30720 \n      76) water&lt;=144.700 2 19.594 2.67447 *\n      77) water&gt;144.700 4 41.406 -4.79803 \n       154) cement&lt;=235.350 2 29.261 -6.54053 *\n       155) cement&gt;235.350 2 0.0000 -3.05553 *\n     39) cement&gt;264.450 4 25.404 6.92947 *\n  5) cement&gt;354.500 77 10626 -1.10657 \n   10) water&lt;=183.400 50 5046.8 3.13347 \n    20) age&lt;=5.00000 28 845.79 -2.73232 \n     40) cement&lt;=389.250 14 286.38 -6.39053 \n      80) blast-furnace-slag&lt;=143.050 9 83.833 -9.22109 \n       160) superplasticizer&lt;=13.0000 5 63.404 -7.87353 \n        320) cement&lt;=387.800 2 61.938 -7.21053 *\n        321) cement&gt;387.800 3 0.0000 -8.31553 *\n       161) superplasticizer&gt;13.0000 4 0.0000 -10.9055 *\n      81) blast-furnace-slag&gt;143.050 5 0.64800 -1.29553 *\n     41) cement&gt;389.250 14 184.70 0.925895 \n      82) water&lt;=149.400 5 0.32800 4.66447 \n       164) cement&lt;=466.550 3 0.16667 4.51780 *\n       165) cement&gt;466.550 2 0.0000 4.88447 *\n      83) water&gt;149.400 9 75.662 -1.15109 \n       166) cement&lt;=460.500 7 17.241 -2.42411 \n        332) coarse-aggregate&lt;=909.000 4 1.8006 -3.68553 \n         664) cement&lt;=424.500 2 0.0050000 -4.35553 *\n         665) cement&gt;424.500 2 0.0000 -3.01553 *\n        333) coarse-aggregate&gt;909.000 3 0.58907 -0.742201 *\n       167) cement&gt;460.500 2 7.3728 3.30447 *\n    21) age&gt;5.00000 22 2011.4 10.5990 \n     42) fly-ash&lt;=66.0000 17 1446.3 13.3086 \n      84) superplasticizer&lt;=5.05000 2 0.0000 23.3445 *\n      85) superplasticizer&gt;5.05000 15 1218.0 11.9705 \n       170) water&lt;=148.650 5 117.66 16.1225 \n        340) cement&lt;=500.150 3 11.704 19.8811 *\n        341) cement&gt;500.150 2 0.0000 10.4845 *\n       171) water&gt;148.650 10 971.09 9.89447 \n        342) cement&lt;=406.800 7 948.53 8.99875 \n         684) cement&lt;=368.300 4 816.75 11.2345 *\n         685) cement&gt;368.300 3 85.127 6.01780 *\n        343) cement&gt;406.800 3 3.8400 11.9845 *\n     43) fly-ash&gt;66.0000 5 15.917 1.38647 *\n   11) water&gt;183.400 27 3016.0 -8.95850 \n    22) cement&lt;=512.500 23 1701.0 -11.7060 \n     44) coarse-aggregate&lt;=938.100 11 205.02 -4.66099 \n      88) age&lt;=5.00000 3 0.99227 -11.2122 *\n      89) age&gt;5.00000 8 26.992 -2.20428 \n       178) blast-furnace-slag&lt;=13.0000 2 8.1205 0.169466 *\n       179) blast-furnace-slag&gt;13.0000 6 3.8454 -2.99553 \n        358) cement&lt;=403.750 3 0.0000 -3.59553 *\n        359) cement&gt;403.750 3 1.6854 -2.39553 *\n     45) coarse-aggregate&gt;938.100 12 449.58 -18.1639 \n      90) age&lt;=5.00000 7 52.272 -21.0998 \n       180) coarse-aggregate&lt;=953.300 2 0.0040500 -17.2605 *\n       181) coarse-aggregate&gt;953.300 5 10.995 -22.6355 \n        362) cement&lt;=442.500 2 1.2482 -20.9255 *\n        363) cement&gt;442.500 3 0.0000 -23.7755 *\n      91) age&gt;5.00000 5 252.50 -14.0535 \n       182) cement&lt;=381.950 2 0.0000 -21.8755 *\n       183) cement&gt;381.950 3 48.554 -8.83887 *\n    23) cement&gt;512.500 4 143.04 6.83947 \n     46) age&lt;=10.5000 2 37.152 1.69447 *\n     47) age&gt;10.5000 2 0.0000 11.9845 *\n 3) age&gt;21.0000 659 1.5440e+05 5.22038 \n  6) cement&lt;=355.950 503 83714 0.567369 \n   12) cement&lt;=159.400 93 8058.8 -12.0387 \n    24) blast-furnace-slag&lt;=51.0000 23 169.25 -24.1464 \n     48) water&lt;=193.150 14 26.442 -22.2577 \n      96) fly-ash&lt;=170.450 7 1.6789 -23.5870 \n       192) superplasticizer&lt;=9.50000 3 0.052267 -24.1422 *\n       193) superplasticizer&gt;9.50000 4 0.0081000 -23.1705 \n        386) cement&lt;=140.000 2 0.0000 -23.1255 *\n        387) cement&gt;140.000 2 0.0000 -23.2155 *\n      97) fly-ash&gt;170.450 7 0.025143 -20.9284 \n       194) cement&lt;=145.800 3 0.0000 -20.9955 *\n       195) cement&gt;145.800 4 0.0014750 -20.8780 \n        390) water&lt;=181.200 2 0.0012500 -20.8705 *\n        391) water&gt;181.200 2 0.0000 -20.8855 *\n     49) water&gt;193.150 9 15.174 -27.0844 \n      98) cement&lt;=156.400 3 3.9083 -25.5022 *\n      99) cement&gt;156.400 6 7.5731e-29 -27.8755 *\n    25) blast-furnace-slag&gt;51.0000 70 3409.9 -8.06039 \n     50) blast-furnace-slag&lt;=157.500 28 339.16 -12.2884 \n      100) water&lt;=197.450 24 165.51 -11.3080 \n       200) cement&lt;=152.850 12 102.84 -12.8247 \n        400) fly-ash&lt;=45.8500 3 37.169 -15.8322 *\n        401) fly-ash&gt;45.8500 9 29.487 -11.8222 \n         802) cement&lt;=147.000 2 4.5602 -8.76553 *\n         803) cement&gt;147.000 7 0.90140 -12.6955 \n          1606) blast-furnace-slag&lt;=128.500 4 0.0000 -12.8955 *\n          1607) blast-furnace-slag&gt;128.500 3 0.52807 -12.4289 *\n       201) cement&gt;152.850 12 7.4677 -9.79137 \n        402) cement&lt;=155.850 8 0.77899 -10.3193 \n         804) coarse-aggregate&lt;=944.950 6 0.012150 -10.1405 \n          1608) blast-furnace-slag&lt;=123.500 3 0.0000 -10.0955 *\n          1609) blast-furnace-slag&gt;123.500 3 0.0000 -10.1855 *\n         805) coarse-aggregate&gt;944.950 2 0.0000 -10.8555 *\n        403) cement&gt;155.850 4 0.0000 -8.73553 *\n      101) water&gt;197.450 4 12.180 -18.1705 \n       202) cement&lt;=150.050 2 0.0000 -16.4255 *\n       203) cement&gt;150.050 2 0.0000 -19.9155 *\n     51) blast-furnace-slag&gt;157.500 42 2236.5 -5.24172 \n      102) superplasticizer&lt;=10.4500 33 1407.6 -7.28887 \n       204) age&lt;=59.0000 26 680.50 -9.26476 \n        408) fly-ash&lt;=112.000 17 306.84 -11.8232 \n         816) fine-aggregate&lt;=771.150 6 56.531 -15.8022 \n          1632) blast-furnace-slag&lt;=220.850 3 0.0042667 -18.1889 *\n          1633) blast-furnace-slag&gt;220.850 3 22.349 -13.4155 *\n         817) fine-aggregate&gt;771.150 11 103.50 -9.65281 \n          1634) blast-furnace-slag&lt;=198.000 7 22.955 -11.4827 \n           3268) fine-aggregate&lt;=848.250 4 7.7458 -10.2655 \n            6536) cement&lt;=141.000 2 0.0000 -9.44553 *\n            6537) cement&gt;141.000 2 5.0562 -11.0855 *\n           3269) fine-aggregate&gt;848.250 3 1.3824 -13.1055 *\n          1635) blast-furnace-slag&gt;198.000 4 16.089 -6.45053 \n           3270) blast-furnace-slag&lt;=209.700 2 0.068450 -8.36053 *\n           3271) blast-furnace-slag&gt;209.700 2 1.4280 -4.54053 *\n        409) fly-ash&gt;112.000 9 52.205 -4.43220 \n         818) superplasticizer&lt;=7.20000 4 3.7249 -2.15053 \n          1636) cement&lt;=135.850 2 0.0000 -3.11553 *\n          1637) cement&gt;135.850 2 0.0000 -1.18553 *\n         819) superplasticizer&gt;7.20000 5 10.997 -6.25753 \n          1638) cement&lt;=143.350 3 0.29040 -7.12553 *\n          1639) cement&gt;143.350 2 5.0562 -4.95553 *\n       205) age&gt;59.0000 7 248.56 0.0501803 \n        410) cement&lt;=127.800 3 2.1361 -6.58887 *\n        411) cement&gt;127.800 4 15.022 5.02947 \n         822) cement&lt;=149.150 2 0.045000 3.09447 *\n         823) cement&gt;149.150 2 0.0000 6.96447 *\n      103) superplasticizer&gt;10.4500 9 183.56 2.26447 \n       206) cement&lt;=145.500 3 0.0000 8.19447 *\n       207) cement&gt;145.500 6 25.314 -0.700534 \n        414) fine-aggregate&lt;=743.500 4 0.84067 0.726966 \n         828) cement&lt;=151.000 2 0.0000 1.01447 *\n         829) cement&gt;151.000 2 0.51005 0.439466 *\n        415) fine-aggregate&gt;743.500 2 0.020000 -3.55553 *\n   13) cement&gt;159.400 410 57524 3.42678 \n    26) blast-furnace-slag&lt;=42.1500 230 22606 -1.22553 \n     52) water&lt;=175.650 74 6422.8 6.21393 \n      104) cement&lt;=213.050 31 1505.1 -0.381663 \n       208) age&lt;=42.0000 13 387.47 -6.05015 \n        416) cement&lt;=203.350 8 118.84 -9.28178 \n         832) fly-ash&lt;=168.100 6 4.2177 -11.4672 \n          1664) cement&lt;=190.500 4 0.27908 -12.0230 *\n          1665) cement&gt;190.500 2 0.23120 -10.3555 *\n         833) fly-ash&gt;168.100 2 0.0000 -2.72553 *\n        417) cement&gt;203.350 5 51.403 -0.879534 \n         834) cement&lt;=212.250 2 0.0000 2.08447 *\n         835) cement&gt;212.250 3 22.118 -2.85553 *\n       209) age&gt;42.0000 18 398.21 3.71224 \n        418) cement&lt;=203.350 13 191.87 1.64908 \n         836) water&lt;=168.100 9 49.000 -0.0688673 \n          1672) fine-aggregate&lt;=800.750 2 0.25205 -3.21053 *\n          1673) fine-aggregate&gt;800.750 7 23.368 0.828752 \n           3346) water&lt;=162.850 2 1.6744 3.05947 *\n           3347) water&gt;162.850 5 7.7605 -0.0635340 \n            6694) age&lt;=78.0000 3 4.5067 -0.722201 *\n            6695) age&gt;78.0000 2 0.0000 0.924466 *\n         837) water&gt;168.100 4 56.546 5.51447 \n          1674) cement&lt;=188.050 2 48.020 4.05447 *\n          1675) cement&gt;188.050 2 0.0000 6.97447 *\n        419) cement&gt;203.350 5 7.1213 9.07647 *\n      105) cement&gt;213.050 43 2596.9 10.9689 \n       210) age&lt;=42.0000 20 1098.1 6.25947 \n        420) water&lt;=152.400 6 49.106 13.7228 \n         840) cement&lt;=249.550 2 0.0000 16.0845 *\n         841) cement&gt;249.550 4 32.374 12.5420 *\n        421) water&gt;152.400 14 571.53 3.06089 \n         842) fine-aggregate&lt;=780.200 5 30.110 10.6425 \n          1684) cement&lt;=244.300 2 0.0000 8.22447 *\n          1685) cement&gt;244.300 3 10.621 12.2545 *\n         843) fine-aggregate&gt;780.200 9 94.357 -1.15109 \n          1686) cement&lt;=254.650 2 0.0000 -6.19553 *\n          1687) cement&gt;254.650 7 28.923 0.290180 \n           3374) water&lt;=169.000 4 0.94080 -1.39553 *\n           3375) water&gt;169.000 3 1.4603 2.53780 *\n       211) age&gt;42.0000 23 669.55 15.0640 \n        422) superplasticizer&lt;=9.45000 6 15.130 10.3411 \n         844) cement&lt;=261.100 3 0.0000 9.42447 *\n         845) cement&gt;261.100 3 10.088 11.2578 *\n        423) superplasticizer&gt;9.45000 17 473.35 16.7309 \n         846) cement&lt;=252.050 8 184.84 13.3632 \n          1692) fly-ash&lt;=124.600 3 0.49307 9.24113 *\n          1693) fly-ash&gt;124.600 5 102.79 15.8365 \n           3386) fly-ash&lt;=174.450 3 46.381 18.4311 *\n           3387) fly-ash&gt;174.450 2 5.9168 11.9445 *\n         847) cement&gt;252.050 9 117.13 19.7245 \n          1694) cement&lt;=276.100 6 13.172 22.1211 \n           3388) cement&lt;=263.700 2 13.107 21.9745 *\n           3389) cement&gt;263.700 4 0.0000 22.1945 *\n          1695) cement&gt;276.100 3 0.56427 14.9311 *\n     53) water&gt;175.650 156 10144 -4.75451 \n      106) coarse-aggregate&lt;=1058.10 122 6030.5 -2.39693 \n       212) cement&lt;=237.050 22 855.77 -10.3042 \n        424) fly-ash&lt;=131.300 14 478.06 -7.43911 \n         848) cement&lt;=234.900 10 275.08 -5.05853 \n          1696) age&lt;=78.0000 7 47.376 -8.03125 \n           3392) age&lt;=42.0000 2 0.061250 -11.7005 *\n           3393) age&gt;42.0000 5 9.6161 -6.56353 \n            6786) fly-ash&lt;=107.450 3 2.1361 -7.56220 *\n            6787) fly-ash&gt;107.450 2 0.0000 -5.06553 *\n          1697) age&gt;78.0000 3 21.512 1.87780 *\n         849) cement&gt;234.900 4 4.6225 -13.3905 \n          1698) water&lt;=193.500 2 0.0000 -12.3155 *\n          1699) water&gt;193.500 2 0.0000 -14.4655 *\n        425) fly-ash&gt;131.300 8 61.683 -15.3180 \n         850) cement&lt;=183.300 2 4.3218 -19.8555 *\n         851) cement&gt;183.300 6 2.4576 -13.8055 \n          1702) age&lt;=42.0000 3 0.0000 -14.4455 *\n          1703) age&gt;42.0000 3 0.0000 -13.1655 *\n       213) cement&gt;237.050 100 3496.6 -0.657334 \n        426) water&lt;=190.000 29 824.84 3.31481 \n         852) coarse-aggregate&lt;=993.000 18 279.45 5.70613 \n          1704) fine-aggregate&lt;=854.100 14 54.881 7.15304 \n           3408) coarse-aggregate&lt;=914.450 5 23.070 5.15047 *\n           3409) coarse-aggregate&gt;914.450 9 0.62049 8.26558 \n            6818) cement&lt;=335.000 3 0.00060000 7.89447 *\n            6819) cement&gt;335.000 6 0.00013333 8.45113 \n             13638) cement&lt;=336.250 2 0.0000 8.44447 *\n             13639) cement&gt;336.250 4 0.0000 8.45447 *\n          1705) fine-aggregate&gt;854.100 4 92.675 0.641966 *\n         853) coarse-aggregate&gt;993.000 11 274.02 -0.598261 \n          1706) age&lt;=64.0000 9 114.32 -2.39331 \n           3412) fine-aggregate&lt;=723.350 4 0.0000 0.384466 *\n           3413) fine-aggregate&gt;723.350 5 58.769 -4.61553 \n            6826) cement&lt;=331.500 3 38.102 -6.27553 *\n            6827) cement&gt;331.500 2 0.0000 -2.12553 *\n          1707) age&gt;64.0000 2 0.19845 7.47947 *\n        427) water&gt;190.000 71 2027.3 -2.27976 \n         854) fine-aggregate&lt;=920.150 68 1555.3 -1.73818 \n          1708) age&lt;=42.0000 29 474.64 -4.40174 \n           3416) fly-ash&lt;=122.900 25 167.34 -5.69673 \n            6832) coarse-aggregate&lt;=976.000 17 114.24 -6.65553 \n             13664) superplasticizer&lt;=9.95000 7 39.373 -9.10268 \n              27328) water&lt;=200.000 3 12.489 -7.25220 *\n              27329) water&gt;200.000 4 8.9067 -10.4905 \n               54658) cement&lt;=336.000 2 0.89780 -11.9055 *\n               54659) cement&gt;336.000 2 0.0000 -9.07553 *\n             13665) superplasticizer&gt;9.95000 10 3.6010 -4.94253 \n              27330) cement&lt;=301.500 6 0.68255 -4.57053 \n               54660) water&lt;=215.500 4 0.14068 -4.35803 \n                109320) cement&lt;=285.500 2 5.0000e-05 -4.17053 *\n                109321) cement&gt;285.500 2 0.0000 -4.54553 *\n               54661) water&gt;215.500 2 0.0000 -4.99553 *\n              27331) cement&gt;301.500 4 0.84270 -5.50053 *\n            6833) coarse-aggregate&gt;976.000 8 4.2624 -3.65928 \n             13666) coarse-aggregate&lt;=1034.30 2 0.042050 -4.82053 *\n             13667) coarse-aggregate&gt;1034.30 6 0.62433 -3.27220 \n              27334) cement&lt;=300.200 3 0.0000 -3.14553 *\n              27335) cement&gt;300.200 3 0.52807 -3.39887 *\n           3417) fly-ash&gt;122.900 4 3.3481 3.69197 \n            6834) cement&lt;=341.200 2 1.0224 2.92947 *\n            6835) cement&gt;341.200 2 0.0000 4.45447 *\n          1709) age&gt;42.0000 39 721.92 0.242415 \n           3418) coarse-aggregate&lt;=976.000 22 397.09 -2.15781 \n            6836) cement&lt;=346.000 16 310.64 -0.981784 \n             13672) cement&lt;=324.500 12 59.206 -2.38137 \n              27344) coarse-aggregate&lt;=931.050 3 0.0000 -4.34553 *\n              27345) coarse-aggregate&gt;931.050 9 43.774 -1.72665 \n               54690) age&lt;=272.500 7 38.284 -2.14411 \n                109380) water&lt;=192.500 3 27.853 -0.865534 *\n                109381) water&gt;192.500 4 1.8487 -3.10303 *\n               54691) age&gt;272.500 2 0.0000 -0.265534 *\n             13673) cement&gt;324.500 4 157.41 3.21697 \n              27346) age&lt;=135.000 2 116.89 6.39947 *\n              27347) age&gt;135.000 2 0.0000 0.0344660 *\n            6837) cement&gt;346.000 6 5.3179 -5.29387 \n             13674) age&lt;=73.0000 2 0.0000 -6.43553 *\n             13675) age&gt;73.0000 4 1.4077 -4.72303 *\n           3419) coarse-aggregate&gt;976.000 17 34.068 3.34858 \n            6838) age&lt;=150.000 13 19.821 2.85524 \n             13676) coarse-aggregate&lt;=1001.50 3 0.0000 0.814466 *\n             13677) coarse-aggregate&gt;1001.50 10 3.5784 3.46747 \n              27354) coarse-aggregate&lt;=1051.50 7 0.50129 3.10589 \n               54708) cement&lt;=291.200 2 0.38720 3.29447 *\n               54709) cement&gt;291.200 5 0.014520 3.03047 \n                109418) cement&lt;=340.000 2 0.0000 2.96447 *\n                109419) cement&gt;340.000 3 0.0000 3.07447 *\n              27355) coarse-aggregate&gt;1051.50 3 0.026667 4.31113 *\n            6839) age&gt;150.000 4 0.79928 4.95197 \n             13678) age&lt;=270.000 2 0.0000 4.63447 *\n             13679) age&gt;270.000 2 0.39605 5.26947 *\n         855) fine-aggregate&gt;920.150 3 0.0000 -14.5555 *\n      107) coarse-aggregate&gt;1058.10 34 1002.7 -13.2141 \n       214) coarse-aggregate&lt;=1097.00 18 316.11 -9.25053 \n        428) cement&lt;=310.500 13 193.21 -10.8578 \n         856) age&lt;=42.0000 8 21.883 -13.5818 \n          1712) coarse-aggregate&lt;=1086.50 5 0.0096800 -14.8535 *\n          1713) coarse-aggregate&gt;1086.50 3 0.30827 -11.4622 *\n         857) age&gt;42.0000 5 16.994 -6.49953 \n          1714) age&lt;=73.0000 2 0.0000 -7.78553 *\n          1715) age&gt;73.0000 3 11.482 -5.64220 *\n        429) cement&gt;310.500 5 1.9993 -5.07153 \n         858) cement&lt;=332.000 2 0.0000 -5.84553 *\n         859) cement&gt;332.000 3 0.0024000 -4.55553 *\n       215) coarse-aggregate&gt;1097.00 16 85.656 -17.6730 \n        430) cement&lt;=245.000 7 23.439 -19.6884 \n         860) coarse-aggregate&lt;=1118.50 5 0.048000 -18.9555 \n          1720) cement&lt;=231.500 2 0.0000 -19.0755 *\n          1721) cement&gt;231.500 3 0.0000 -18.8755 *\n         861) coarse-aggregate&gt;1118.50 2 13.992 -21.5205 *\n        431) cement&gt;245.000 9 11.672 -16.1055 \n         862) cement&lt;=266.750 7 0.0054857 -16.7141 *\n         863) cement&gt;266.750 2 0.0000 -13.9755 *\n    27) blast-furnace-slag&gt;42.1500 180 23579 9.37141 \n     54) water&lt;=164.400 23 3225.1 24.8384 \n      108) fine-aggregate&lt;=767.550 4 22.770 43.9570 *\n      109) fine-aggregate&gt;767.550 19 1432.5 20.8134 \n       218) blast-furnace-slag&lt;=48.0000 3 193.35 6.05780 *\n       219) blast-furnace-slag&gt;48.0000 16 463.49 23.5801 \n        438) cement&lt;=216.550 5 18.114 18.1325 \n         876) age&lt;=78.0000 3 1.0584 16.6245 *\n         877) age&gt;78.0000 2 0.0000 20.3945 *\n        439) cement&gt;216.550 11 229.54 26.0563 \n         878) cement&lt;=298.000 7 27.867 28.5259 \n          1756) age&lt;=42.0000 4 16.780 27.9070 *\n          1757) age&gt;42.0000 3 7.5125 29.3511 *\n         879) cement&gt;298.000 4 84.270 21.7345 *\n     55) water&gt;164.400 157 14046 7.10555 \n      110) age&lt;=42.0000 97 7748.4 3.78807 \n       220) cement&lt;=318.550 87 4548.4 2.04113 \n        440) cement&lt;=196.750 31 1519.0 -2.18844 \n         880) water&lt;=184.450 20 176.65 2.15747 \n          1760) superplasticizer&lt;=15.9000 18 125.17 2.69224 \n           3520) blast-furnace-slag&lt;=71.7500 2 24.012 -1.68053 *\n           3521) blast-furnace-slag&gt;71.7500 16 58.136 3.23884 \n            7042) fly-ash&lt;=125.300 13 3.7893 2.74370 \n             14084) blast-furnace-slag&lt;=254.850 11 0.13007 2.96992 \n              28168) cement&lt;=169.000 9 0.0058222 3.02002 \n               56336) blast-furnace-slag&lt;=189.000 3 0.0000 2.98447 *\n               56337) blast-furnace-slag&gt;189.000 6 0.00013333 3.03780 \n                112674) cement&lt;=159.900 2 0.0000 3.04447 *\n                112675) cement&gt;159.900 4 0.0000 3.03447 *\n              28169) cement&gt;169.000 2 0.0000 2.74447 *\n             14085) blast-furnace-slag&gt;254.850 2 5.0000e-05 1.49947 *\n            7043) fly-ash&gt;125.300 3 37.348 5.38447 *\n          1761) superplasticizer&gt;15.9000 2 0.0000 -2.65553 *\n         881) water&gt;184.450 11 277.81 -10.0901 \n          1762) blast-furnace-slag&lt;=175.500 8 55.479 -12.8155 \n           3524) cement&lt;=183.950 5 7.8061 -11.3475 \n            7048) cement&lt;=171.650 2 1.1250 -9.93553 *\n            7049) cement&gt;171.650 3 0.035267 -12.2889 *\n           3525) cement&gt;183.950 3 18.939 -15.2622 *\n          1763) blast-furnace-slag&gt;175.500 3 4.4425 -2.82220 *\n        441) cement&gt;196.750 56 2167.8 4.38250 \n         882) fine-aggregate&lt;=754.400 34 1248.6 2.60741 \n          1764) fine-aggregate&lt;=700.100 21 617.83 5.90637 \n           3528) coarse-aggregate&lt;=891.000 3 35.429 14.6745 *\n           3529) coarse-aggregate&gt;891.000 18 313.33 4.44502 \n            7058) water&lt;=219.000 16 204.66 3.57634 \n             14116) coarse-aggregate&lt;=1001.95 14 110.23 2.83947 \n              28232) fly-ash&lt;=102.450 12 74.558 3.38947 \n               56464) fly-ash&lt;=86.5000 9 15.287 2.10669 \n                112928) water&lt;=194.600 6 6.1555 2.81780 \n                 225856) fine-aggregate&lt;=689.000 3 1.4941 3.64780 *\n                 225857) fine-aggregate&gt;689.000 3 0.52807 1.98780 *\n                112929) water&gt;194.600 3 0.029400 0.684466 *\n               56465) fly-ash&gt;86.5000 3 0.032267 7.23780 *\n              28233) fly-ash&gt;102.450 2 10.260 -0.460534 *\n             14117) coarse-aggregate&gt;1001.95 2 33.620 8.73447 *\n            7059) water&gt;219.000 2 0.0000 11.3945 *\n          1765) fine-aggregate&gt;700.100 13 33.033 -2.72169 \n           3530) water&lt;=187.150 4 2.0667 -3.79053 *\n           3531) water&gt;187.150 9 24.366 -2.24665 \n            7062) blast-furnace-slag&lt;=139.950 7 0.20457 -2.80125 \n             14124) cement&lt;=282.750 4 0.0064000 -2.65553 \n              28248) cement&lt;=258.600 2 0.0000 -2.61553 *\n              28249) cement&gt;258.600 2 0.0000 -2.69553 *\n             14125) cement&gt;282.750 3 0.0000 -2.99553 *\n            7063) blast-furnace-slag&gt;139.950 2 14.472 -0.305534 *\n         883) fine-aggregate&gt;754.400 22 646.54 7.12583 \n          1766) water&lt;=198.050 20 373.46 8.23997 \n           3532) superplasticizer&lt;=9.25000 16 189.80 6.88197 \n            7064) fine-aggregate&lt;=785.450 9 3.3158 9.43447 \n             14128) cement&lt;=282.500 4 1.5337 8.93697 *\n             14129) cement&gt;282.500 5 8.0000e-05 9.83247 *\n            7065) fine-aggregate&gt;785.450 7 52.456 3.60018 \n             14130) cement&lt;=258.250 2 23.324 0.399466 *\n             14131) cement&gt;258.250 5 0.44652 4.88047 \n              28262) cement&lt;=274.500 3 0.0000 5.12447 *\n              28263) cement&gt;274.500 2 0.0000 4.51447 *\n           3533) superplasticizer&gt;9.25000 4 36.124 13.6720 \n            7066) water&lt;=171.500 2 9.9905 11.1195 *\n            7067) water&gt;171.500 2 0.072200 16.2245 *\n          1767) water&gt;198.050 2 0.0000 -4.01553 *\n       221) cement&gt;318.550 10 624.60 18.9865 \n        442) blast-furnace-slag&lt;=156.300 2 188.37 6.30947 *\n        443) blast-furnace-slag&gt;156.300 8 34.458 22.1557 \n         886) water&lt;=182.000 3 6.6667e-05 24.8178 *\n         887) water&gt;182.000 5 0.44172 20.5585 \n          1774) coarse-aggregate&lt;=840.500 2 0.0000 20.1945 *\n          1775) coarse-aggregate&gt;840.500 3 6.6667e-05 20.8011 *\n      111) age&gt;42.0000 60 3504.1 12.4688 \n       222) superplasticizer&lt;=8.40000 56 1760.1 11.2188 \n        444) fine-aggregate&lt;=612.000 8 46.573 2.73947 \n         888) cement&lt;=285.000 2 13.992 -0.650534 *\n         889) cement&gt;285.000 6 1.9357 3.86947 \n          1778) age&lt;=317.500 4 0.18008 3.48697 *\n          1779) age&gt;317.500 2 0.0000 4.63447 *\n        445) fine-aggregate&gt;612.000 48 1042.5 12.6320 \n         890) fine-aggregate&lt;=799.850 43 512.62 13.6370 \n          1780) age&lt;=95.0000 26 321.13 12.3075 \n           3560) fly-ash&lt;=127.050 22 201.31 11.3922 \n            7120) fine-aggregate&lt;=650.000 3 0.0000 15.4445 *\n            7121) fine-aggregate&gt;650.000 19 144.27 10.7524 \n             14242) cement&lt;=212.850 5 39.949 7.37047 \n              28484) blast-furnace-slag&lt;=135.550 2 12.954 9.62947 *\n              28485) blast-furnace-slag&gt;135.550 3 9.9846 5.86447 *\n             14243) cement&gt;212.850 14 26.715 11.9602 \n              28486) blast-furnace-slag&lt;=106.050 4 2.4964 13.5645 \n               56972) cement&lt;=258.850 2 0.0000 14.3545 *\n               56973) cement&gt;258.850 2 0.0000 12.7745 *\n              28487) blast-furnace-slag&gt;106.050 10 9.8060 11.3185 \n               56974) water&lt;=197.750 3 5.0417 12.2811 *\n               56975) water&gt;197.750 7 0.79269 10.9059 \n                113950) cement&lt;=258.100 3 0.0000 11.2945 *\n                113951) cement&gt;258.100 4 0.0000 10.6145 *\n           3561) fly-ash&gt;127.050 4 0.0018750 17.3420 *\n          1781) age&gt;95.0000 17 75.245 15.6703 \n           3562) cement&lt;=175.750 2 2.8800 18.4445 *\n           3563) cement&gt;175.750 15 54.921 15.3005 \n            7126) cement&lt;=201.850 5 2.9939 13.7125 \n             14252) cement&lt;=186.000 2 0.87120 12.9145 *\n             14253) cement&gt;186.000 3 0.0000 14.2445 *\n            7127) cement&gt;201.850 10 33.014 16.0945 \n             14254) coarse-aggregate&lt;=1065.90 8 16.885 16.7295 \n              28508) age&lt;=225.000 4 8.7025 16.0095 \n               57016) cement&lt;=258.850 2 0.0000 17.4845 *\n               57017) cement&gt;258.850 2 0.0000 14.5345 *\n              28509) age&gt;225.000 4 4.0353 17.4495 \n               57018) cement&lt;=285.000 2 0.0000 16.4945 *\n               57019) cement&gt;285.000 2 0.38720 18.4045 *\n             14255) coarse-aggregate&gt;1065.90 2 0.0000 13.5545 *\n         891) fine-aggregate&gt;799.850 5 112.86 3.98847 \n          1782) age&lt;=225.000 3 62.265 1.39113 *\n          1783) age&gt;225.000 2 0.0000 7.88447 *\n       223) superplasticizer&gt;8.40000 4 431.45 29.9695 \n        446) cement&lt;=318.500 2 122.62 22.3545 *\n        447) cement&gt;318.500 2 76.880 37.5845 *\n  7) cement&gt;355.950 156 24682 20.2234 \n   14) superplasticizer&lt;=0.950000 52 6600.6 10.0302 \n    28) cement&lt;=482.500 38 1630.8 4.81710 \n     56) age&lt;=73.0000 21 502.50 0.917323 \n      112) fine-aggregate&lt;=762.700 19 223.57 2.01341 \n       224) cement&lt;=398.500 13 60.612 0.203697 \n        448) water&lt;=185.350 4 2.0917 2.25697 *\n        449) water&gt;185.350 9 34.161 -0.708867 \n         898) cement&lt;=389.750 6 3.1142 0.604466 \n          1796) water&lt;=200.300 3 0.40580 1.27447 *\n          1797) water&gt;200.300 3 0.015000 -0.0655340 *\n         899) cement&gt;389.750 3 0.0000 -3.33553 *\n       225) cement&gt;398.500 6 28.134 5.93447 \n        450) water&lt;=210.000 4 0.043200 7.46447 *\n        451) water&gt;210.000 2 0.0000 2.87447 *\n      113) fine-aggregate&gt;762.700 2 39.250 -9.49553 *\n     57) age&gt;73.0000 17 414.44 9.63447 \n      114) fine-aggregate&lt;=632.000 9 8.1563 5.56335 \n       228) age&lt;=225.000 5 2.5603 5.14847 \n        456) cement&lt;=403.750 2 0.0000 4.34447 *\n        457) cement&gt;403.750 3 0.40560 5.68447 *\n       229) age&gt;225.000 4 3.6595 6.08197 \n        458) cement&lt;=403.750 2 3.2513 6.00947 *\n        459) cement&gt;403.750 2 0.38720 6.15447 *\n      115) fine-aggregate&gt;632.000 8 89.306 14.2145 \n       230) coarse-aggregate&lt;=936.000 5 0.40368 16.4525 \n        460) age&lt;=272.500 3 0.0000 16.6845 *\n        461) age&gt;272.500 2 0.0000 16.1045 *\n       231) coarse-aggregate&gt;936.000 3 22.120 10.4845 *\n    29) cement&gt;482.500 14 1133.9 24.1802 \n     58) water&lt;=181.000 4 7.4077 36.2320 \n      116) cement&lt;=503.500 2 0.0000 35.5745 *\n      117) cement&gt;503.500 2 5.6784 36.8895 *\n     59) water&gt;181.000 10 313.12 19.3595 \n      118) cement&lt;=512.500 4 95.243 13.9920 \n       236) age&lt;=180.000 2 4.8984 9.23947 *\n       237) age&gt;180.000 2 0.0000 18.7445 *\n      119) cement&gt;512.500 6 25.813 22.9378 \n       238) age&lt;=135.000 4 6.0492 21.6545 *\n       239) age&gt;135.000 2 0.0000 25.5045 *\n   15) superplasticizer&gt;0.950000 104 9977.1 25.3199 \n    30) coarse-aggregate&lt;=811.500 7 0.21429 4.88304 \n     60) superplasticizer&lt;=8.25000 3 0.0000 4.95447 *\n     61) superplasticizer&gt;8.25000 4 0.18750 4.82947 *\n    31) coarse-aggregate&gt;811.500 97 6842.2 26.7948 \n     62) blast-furnace-slag&lt;=164.100 76 3844.1 24.2355 \n      124) superplasticizer&lt;=11.5000 30 2033.7 27.1981 \n       248) superplasticizer&lt;=11.1000 27 1410.1 25.6997 \n        496) fly-ash&lt;=127.500 19 1038.4 23.9071 \n         992) cement&lt;=530.000 17 622.57 22.6580 \n          1984) water&lt;=155.500 3 90.360 28.4645 *\n          1985) water&gt;155.500 14 409.39 21.4138 \n           3970) coarse-aggregate&lt;=862.500 4 165.71 26.7520 \n            7940) cement&lt;=505.500 2 132.36 29.6395 *\n            7941) cement&gt;505.500 2 0.0000 23.8645 *\n           3971) coarse-aggregate&gt;862.500 10 84.106 19.2785 \n            7942) fine-aggregate&lt;=680.500 4 0.23040 22.3445 \n             15884) cement&lt;=415.500 2 0.0000 22.5845 *\n             15885) cement&gt;415.500 2 0.0000 22.1045 *\n            7943) fine-aggregate&gt;680.500 6 21.207 17.2345 \n             15886) cement&lt;=505.500 4 0.45630 18.5495 *\n             15887) cement&gt;505.500 2 0.0000 14.6045 *\n         993) cement&gt;530.000 2 163.80 34.5245 *\n        497) fly-ash&gt;127.500 8 165.66 29.9570 \n         994) age&lt;=42.0000 3 4.3691 24.7811 *\n         995) age&gt;42.0000 5 32.703 33.0625 *\n       249) superplasticizer&gt;11.1000 3 17.340 40.6845 *\n      125) superplasticizer&gt;11.5000 46 1375.4 22.3034 \n       250) water&lt;=153.700 24 318.26 25.8120 \n        500) fine-aggregate&lt;=890.400 16 108.95 27.8132 \n         1000) age&lt;=42.0000 4 0.0000 23.8745 *\n         1001) age&gt;42.0000 12 26.209 29.1261 \n          2002) water&lt;=152.450 4 5.0700 30.9345 *\n          2003) water&gt;152.450 8 1.5188 28.2220 \n           4006) age&lt;=73.5000 5 6.3109e-29 27.8845 *\n           4007) age&gt;73.5000 3 0.0000 28.7845 *\n        501) fine-aggregate&gt;890.400 8 17.075 21.8095 \n         1002) age&lt;=42.0000 3 0.0000 19.9845 *\n         1003) age&gt;42.0000 5 1.0880 22.9045 \n          2006) age&lt;=73.5000 2 0.98000 23.0845 *\n          2007) age&gt;73.5000 3 0.0000 22.7845 *\n       251) water&gt;153.700 22 439.38 18.4758 \n        502) superplasticizer&lt;=13.0000 10 100.33 21.7145 \n         1004) cement&lt;=387.800 3 3.7865e-29 25.0445 *\n         1005) cement&gt;387.800 7 52.810 20.2873 \n          2010) age&lt;=42.0000 4 27.090 19.1120 *\n          2011) age&gt;42.0000 3 12.826 21.8545 *\n        503) superplasticizer&gt;13.0000 12 146.75 15.7770 \n         1006) superplasticizer&lt;=14.1000 4 0.0000 11.5545 *\n         1007) superplasticizer&gt;14.1000 8 39.773 17.8882 \n          2014) age&lt;=42.0000 6 27.817 17.1828 \n           4028) cement&lt;=392.000 3 2.5611 15.1311 *\n           4029) cement&gt;392.000 3 0.0000 19.2345 *\n          2015) age&gt;42.0000 2 0.012800 20.0045 *\n     63) blast-furnace-slag&gt;164.100 21 698.82 36.0568 \n      126) water&lt;=167.500 12 127.30 40.0011 \n       252) age&lt;=42.0000 4 7.6800 35.6845 *\n       253) age&gt;42.0000 8 7.8150 42.1595 \n        506) age&lt;=73.5000 5 5.2920 41.7245 \n         1012) cement&lt;=376.250 3 0.0000 40.8845 *\n         1013) cement&gt;376.250 2 0.0000 42.9845 *\n        507) age&gt;73.5000 3 1.5146e-28 42.8845 *\n      127) water&gt;167.500 9 135.91 30.7978 \n       254) cement&lt;=406.500 5 18.787 28.0285 \n        508) cement&lt;=370.000 3 0.0000 29.4945 *\n        509) cement&gt;370.000 2 2.6680 25.8295 *\n       255) cement&gt;406.500 4 30.847 34.2595 *"])
+
+```
+:::
+
+
+
+### Variable importance
+
+
+::: {.sourceClojure}
+```clojure
+(def importance-tree
+  (let [important (-> final-model-gradient-tree first :summary .importance seq)
+        regressor regressors
+        mapped (zipmap regressor important)
+        sorted (sort-by second mapped)]
+    (reverse sorted)))
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(def map-of-importance-tree
+  (map (fn [[x y]] {:x x :y y}) importance-tree))
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+^kind/vega
+(-> map-of-importance-tree
+    (hanami/plot ht/bar-chart {:X :x :Y :y :XTYPE "nominal" :XSORT "-y"
+                               :XTITLE "Variable" :YTITLE "Importance"
+                               :TITLE "GT Variables of Importance"}))
+```
+:::
+
+
+<div style="max-height:600px;overflow-y:auto;"><div><script>vegaEmbed(document.currentScript.parentElement, {"encoding":{"y":{"field":"y","type":"quantitative","axis":{"title":"Importance"}},"x":{"field":"x","type":"nominal","axis":{"title":"Variable"},"sort":"-y"}},"mark":{"type":"bar","tooltip":true},"width":400,"background":"floralwhite","title":{"text":"GT Variables of Importance"},"height":300,"data":{"values":[{"x":"cement","y":100586.7643961105},{"x":"age","y":82382.34267352971},{"x":"water","y":22373.026821045725},{"x":"blast-furnace-slag","y":20801.93587834294},{"x":"superplasticizer","y":13876.016634256059},{"x":"coarse-aggregate","y":9805.466667615003},{"x":"fine-aggregate","y":6578.2773668609325},{"x":"fly-ash","y":2359.502306675646}]}});</script></div></div>
+
+
+### Random forest
+
+
+::: {.sourceClojure}
+```clojure
+(def final-model-random-forest
+  (-> (evaluate-pipe
+        [(-> best-val-random-forest first :params
+             random-forest-pipe-fn)]
+        (train-test concrete-data))
+      best-models))
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> final-model-random-forest first :summary)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+#object[smile.regression.RandomForest 0x63fe2360 "smile.regression.RandomForest@63fe2360"]
+
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> final-model-random-forest first :metric)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+0.9218359212160757
+
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> final-model-random-forest first :other-metrices)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+({:name :mae,
+  :metric-fn
+  #object[scicloj.ml.core$mae 0x16c47c75 "scicloj.ml.core$mae@16c47c75"],
+  :metric 3.4881083589565574}
+ {:name :rmse,
+  :metric-fn
+  #object[scicloj.ml.core$rmse 0x10e78cbb "scicloj.ml.core$rmse@10e78cbb"],
+  :metric 5.075460135782075})
+
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(-> final-model-random-forest first :params)
+```
+:::
+
+
+
+::: {.printedClojure}
+```clojure
+{:model-type :smile.regression/random-forest,
+ :trees 667,
+ :max-depth 24,
+ :max-nodes 590,
+ :node-size 2,
+ :sample-rate 0.8999999999999999}
+
+```
+:::
+
+
+
+### Learning curve
+
+
+::: {.sourceClojure}
+```clojure
+^kind/vega
+(ml-viz/learnining-curve (-> concrete-data train-test first :train)
+                         (-> best-val-random-forest first :params
+                             random-forest-pipe-fn)
+                         (map #(/ % 10) (vec (range 1 11)))
+                         {:k                5
+                          :metric-fn        ml/mae
+                          :loss-or-accuracy :loss}
+                         {:YSCALE      {:zero false}
+                          :TRAIN-COLOR "green"
+                          :TEST-COLOR  "red"
+                          :TITLE       "Learning Curve"
+                          :YTITLE      "MAE"})
+```
+:::
+
+
+<div style="max-height:600px;overflow-y:auto;"><div><script>vegaEmbed(document.currentScript.parentElement, {"width":400,"background":"floralwhite","title":{"text":"Learning Curve"},"layer":[{"mark":"errorband","encoding":{"y":{"scale":{"zero":false},"field":"metric-train-min","type":"quantitative","axis":{"title":"MAE"}},"color":{"value":"red"},"x":{"field":"train-ds-size","type":"quantitative"},"y2":{"field":"metric-train-max","legend":null}}},{"mark":"errorband","encoding":{"y":{"scale":{"zero":false},"field":"metric-test-min","type":"quantitative","axis":{"title":"MAE"}},"color":{"value":"green"},"x":{"field":"train-ds-size","type":"quantitative"},"y2":{"field":"metric-test-max","legend":null}}},{"mark":{"type":"line","point":true,"tooltip":true},"encoding":{"y":{"scale":{"zero":false},"field":"metric","type":"quantitative","axis":{"title":"MAE"}},"color":{"field":"train-test-metric","type":"nominal","scale":{"range":["green","red"]},"legend":{"labelExpr":"datum.label == 'metric-test' ? 'Cross validation metric' : datum.label == 'metric-train' ? 'Training score' : ''  "}},"x":{"field":"train-ds-size","type":"quantitative"}}}],"height":300,"data":{"values":[{"metric-test-min":2.6515280361440636,"test-ds-size":206,"metric-test-max":3.0988292121069154,"metric-train-max":1.5340013464699482,"$group-name":"9","train-ds-size":824,"metric-train-min":1.4943204355761606,"train-test-metric":"metric-test","metric":2.8751786241254895},{"metric-test-min":2.75524042786429,"test-ds-size":206,"metric-test-max":3.3579706883743214,"metric-train-max":1.6051584768140517,"$group-name":"8","train-ds-size":742,"metric-train-min":1.5226849227108357,"train-test-metric":"metric-test","metric":3.0566055581193057},{"metric-test-min":2.9560041372220813,"test-ds-size":206,"metric-test-max":3.5255438246047555,"metric-train-max":1.698083728058303,"$group-name":"7","train-ds-size":659,"metric-train-min":1.545434908001876,"train-test-metric":"metric-test","metric":3.2407739809134184},{"metric-test-min":3.143635381408145,"test-ds-size":206,"metric-test-max":3.9153121976990333,"metric-train-max":1.7491547205352544,"$group-name":"6","train-ds-size":577,"metric-train-min":1.5564418784310643,"train-test-metric":"metric-test","metric":3.529473789553589},{"metric-test-min":3.3274278310197145,"test-ds-size":206,"metric-test-max":4.268117833043625,"metric-train-max":1.7621519672032344,"$group-name":"5","train-ds-size":494,"metric-train-min":1.6237337909749618,"train-test-metric":"metric-test","metric":3.79777283203167},{"metric-test-min":3.71577662091887,"test-ds-size":206,"metric-test-max":4.746817836167876,"metric-train-max":1.7648291559533842,"$group-name":"4","train-ds-size":412,"metric-train-min":1.744307938278185,"train-test-metric":"metric-test","metric":4.231297228543373},{"metric-test-min":4.168137914850925,"test-ds-size":206,"metric-test-max":5.091653340278974,"metric-train-max":1.960766186901024,"$group-name":"3","train-ds-size":330,"metric-train-min":1.868091284676078,"train-test-metric":"metric-test","metric":4.62989562756495},{"metric-test-min":4.642071093599927,"test-ds-size":206,"metric-test-max":5.831003126274295,"metric-train-max":2.135058319610803,"$group-name":"2","train-ds-size":247,"metric-train-min":2.0859269711781514,"train-test-metric":"metric-test","metric":5.236537109937111},{"metric-test-min":5.402495818842959,"test-ds-size":206,"metric-test-max":6.514137447005241,"metric-train-max":2.5487590161460303,"$group-name":"1","train-ds-size":165,"metric-train-min":2.3144775755932687,"train-test-metric":"metric-test","metric":5.9583166329241},{"metric-test-min":6.90068790718516,"test-ds-size":206,"metric-test-max":7.759540033291579,"metric-train-max":2.6088413731245708,"$group-name":"0","train-ds-size":82,"metric-train-min":2.5019105355902833,"train-test-metric":"metric-test","metric":7.3301139702383695},{"metric-test-min":2.6515280361440636,"test-ds-size":206,"metric-test-max":3.0988292121069154,"metric-train-max":1.5340013464699482,"$group-name":"9","train-ds-size":824,"metric-train-min":1.4943204355761606,"train-test-metric":"metric-train","metric":1.5141608910230544},{"metric-test-min":2.75524042786429,"test-ds-size":206,"metric-test-max":3.3579706883743214,"metric-train-max":1.6051584768140517,"$group-name":"8","train-ds-size":742,"metric-train-min":1.5226849227108357,"train-test-metric":"metric-train","metric":1.5639216997624437},{"metric-test-min":2.9560041372220813,"test-ds-size":206,"metric-test-max":3.5255438246047555,"metric-train-max":1.698083728058303,"$group-name":"7","train-ds-size":659,"metric-train-min":1.545434908001876,"train-test-metric":"metric-train","metric":1.6217593180300895},{"metric-test-min":3.143635381408145,"test-ds-size":206,"metric-test-max":3.9153121976990333,"metric-train-max":1.7491547205352544,"$group-name":"6","train-ds-size":577,"metric-train-min":1.5564418784310643,"train-test-metric":"metric-train","metric":1.6527982994831594},{"metric-test-min":3.3274278310197145,"test-ds-size":206,"metric-test-max":4.268117833043625,"metric-train-max":1.7621519672032344,"$group-name":"5","train-ds-size":494,"metric-train-min":1.6237337909749618,"train-test-metric":"metric-train","metric":1.6929428790890981},{"metric-test-min":3.71577662091887,"test-ds-size":206,"metric-test-max":4.746817836167876,"metric-train-max":1.7648291559533842,"$group-name":"4","train-ds-size":412,"metric-train-min":1.744307938278185,"train-test-metric":"metric-train","metric":1.7545685471157846},{"metric-test-min":4.168137914850925,"test-ds-size":206,"metric-test-max":5.091653340278974,"metric-train-max":1.960766186901024,"$group-name":"3","train-ds-size":330,"metric-train-min":1.868091284676078,"train-test-metric":"metric-train","metric":1.914428735788551},{"metric-test-min":4.642071093599927,"test-ds-size":206,"metric-test-max":5.831003126274295,"metric-train-max":2.135058319610803,"$group-name":"2","train-ds-size":247,"metric-train-min":2.0859269711781514,"train-test-metric":"metric-train","metric":2.1104926453944772},{"metric-test-min":5.402495818842959,"test-ds-size":206,"metric-test-max":6.514137447005241,"metric-train-max":2.5487590161460303,"$group-name":"1","train-ds-size":165,"metric-train-min":2.3144775755932687,"train-test-metric":"metric-train","metric":2.4316182958696495},{"metric-test-min":6.90068790718516,"test-ds-size":206,"metric-test-max":7.759540033291579,"metric-train-max":2.6088413731245708,"$group-name":"0","train-ds-size":82,"metric-train-min":2.5019105355902833,"train-test-metric":"metric-train","metric":2.555375954357427}]}});</script></div></div>
+
+
+### Variable importance
+
+
+::: {.sourceClojure}
+```clojure
+(def importance-forest
+  (let [important (-> final-model-random-forest first :summary .importance seq)
+        regressor regressors
+        mapped (zipmap regressor important)
+        sorted (sort-by second mapped)]
+    (reverse sorted)))
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+(def map-of-importance-forest
+  (map (fn [[x y]] {:x x :y y}) importance-forest))
+```
+:::
+
+
+
+::: {.sourceClojure}
+```clojure
+^kind/vega
+(-> map-of-importance-forest
+    (hanami/plot ht/bar-chart {:X :x :Y :y :XTYPE "nominal" :XSORT "-y"
+                               :XTITLE "Variable" :YTITLE "Importance"
+                               :TITLE "RF Variables of Importance"}))
+```
+:::
+
+
+<div style="max-height:600px;overflow-y:auto;"><div><script>vegaEmbed(document.currentScript.parentElement, {"encoding":{"y":{"field":"y","type":"quantitative","axis":{"title":"Importance"}},"x":{"field":"x","type":"nominal","axis":{"title":"Variable"},"sort":"-y"}},"mark":{"type":"bar","tooltip":true},"width":400,"background":"floralwhite","title":{"text":"RF Variables of Importance"},"height":300,"data":{"values":[{"x":"age","y":5.489399597950406E7},{"x":"cement","y":3.748017985511539E7},{"x":"water","y":2.098898387095003E7},{"x":"superplasticizer","y":1.4638065188925445E7},{"x":"fine-aggregate","y":1.2604537147865929E7},{"x":"blast-furnace-slag","y":1.1460402788758649E7},{"x":"coarse-aggregate","y":1.1127859389741858E7},{"x":"fly-ash","y":8869386.529041464}]}});</script></div></div>
+
+<div style="background-color:grey;height:2px;width:100%;"></div>
+
+<div></div>
